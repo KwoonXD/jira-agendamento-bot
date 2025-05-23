@@ -26,7 +26,7 @@ def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
         blocos.append(
-            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****""")
+            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
     blocos.append(
         f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}""")
     return "\n".join(blocos)
@@ -80,9 +80,9 @@ with st.form("atualizar_form"):
         data_agendamento = st.date_input("Data de Agendamento", value=date.today())
         hora_agendamento = st.time_input("Hora Agendamento", value=datetime.now().time())
 
-    datetime_inicio = f"{data_inicio}T{hora_inicio}:00.000-0300"
-    datetime_fim = f"{data_fim}T{hora_fim}:00.000-0300"
-    datetime_agendamento = f"{data_agendamento}T{hora_agendamento}:00.000-0300"
+    datetime_inicio = f"{data_inicio}T{hora_inicio.strftime('%H:%M:%S')}.000-0300"
+    datetime_fim = f"{data_fim}T{hora_fim.strftime('%H:%M:%S')}.000-0300"
+    datetime_agendamento = f"{data_agendamento}T{hora_agendamento.strftime('%H:%M:%S')}.000-0300"
 
     custo_visita = st.number_input("Custo da Visita (padrão: 120.0)", value=120.0)
     num_visita = st.number_input("Número de Visita", value=1)
