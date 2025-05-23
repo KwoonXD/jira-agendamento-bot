@@ -4,57 +4,59 @@ import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
 from collections import defaultdict
+import os
 
-# --- Autenticação segura ---
+# ❗ PRIMEEEEIRO COMANDO
+st.set_page_config(page_title="Chamados em Agendamento", layout="wide")
+
+# --- Autenticação via Streamlit Secrets ---
 EMAIL = st.secrets["EMAIL"]
 API_TOKEN = st.secrets["API_TOKEN"]
 JIRA_URL = "https://delfia.atlassian.net"
+AUTH = HTTPBasicAuth(EMAIL, API_TOKEN)
 HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json"
 }
-AUTH = HTTPBasicAuth(EMAIL, API_TOKEN)
 
-# --- Atualização automática a cada 60s ---
-st_autorefresh(interval=60000, key="datarefresh")
+# --- Atualiza automaticamente a cada 60 segundos ---
+st_autorefresh(interval=60 * 1000, key="auto_refresh")
 
 # --- Função para buscar chamados em AGENDAMENTO ---
 def buscar_chamados_agendamento():
     query = {
-        'jql': 'project = "FSA" AND status = "AGENDAMENTO"',
+        'jql': 'project = FSA AND status = AGENDAMENTO',
         'maxResults': 100,
-        'fields': 'summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11994,customfield_11948,customfield_11993'
+        'fields': 'summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948'
     }
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=query)
 
     if res.status_code != 200:
-        st.error(f"Erro ao buscar chamados: {res.status_code} - {res.text}")
+        st.error(f"❌ Erro ao buscar chamados: {res.status_code} - {res.text}")
         return []
 
-    return res.json().get("issues", [])
+    return res.json()["issues"]
 
-# --- Função para agrupar e formatar ---
+# --- Função para agrupar por loja ---
 def agrupar_por_loja(chamados):
     agrupado = defaultdict(list)
-
     for issue in chamados:
         fields = issue["fields"]
-        loja = fields.get("customfield_14954", {}).get("value", "Sem Loja")
+        loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
 
         agrupado[loja].append({
             "key": issue["key"],
-            "pdv": fields.get("customfield_14829") or "--",
+            "pdv": fields.get("customfield_14829", "--"),
             "ativo": fields.get("customfield_14825", {}).get("value", "--"),
-            "problema": fields.get("customfield_12374") or "--",
-            "endereco": fields.get("customfield_12271") or fields.get("customfield_11994", "--"),
+            "problema": fields.get("customfield_12374", "--"),
+            "endereco": fields.get("customfield_12271", "--"),
             "estado": fields.get("customfield_11948", {}).get("value", "--"),
             "cep": fields.get("customfield_11993", "--"),
             "cidade": fields.get("customfield_11994", "--")
         })
-
     return agrupado
 
-# --- Função para gerar mensagem ---
+# --- Função para gerar mensagem no formato desejado ---
 def gerar_mensagem(loja, chamados):
     cidade = chamados[0]["cidade"]
     estado = chamados[0]["estado"]
@@ -67,7 +69,7 @@ def gerar_mensagem(loja, chamados):
 *{ch['key']}*
 Loja {loja}
 PDV: {ch['pdv']}
-ATIVO: {ch['ativo']}
+ATIVO:{ch['ativo']}
 Problema: {ch['problema']}
 
 Endereço: {endereco}
@@ -78,27 +80,22 @@ Cidade: {cidade}
     else:
         blocos = []
         for ch in chamados:
-            blocos.append(f"""{ch['key']}
-Loja {loja}
-PDV: {ch['pdv']}
-ATIVO: {ch['ativo']}
-Problema: {ch['problema']}
-***""")
+            blocos.append(
+                f"{ch['key']}\nLoja {loja}\nPDV: {ch['pdv']}\nATIVO:{ch['ativo']}\nProblema: {ch['problema']}\n***"
+            )
         blocos.append(f"Endereço: {endereco}\nEstado: {estado}\nCEP: {cep}\nCidade: {cidade}")
         return "\n".join(blocos)
 
-# --- Interface Streamlit ---
-st.set_page_config(page_title="Chamados em Agendamento", layout="wide")
+# --- Interface visual ---
 st.title("📡 Chamados em Agendamento")
 st.caption("Visualização em tempo real")
 
 chamados = buscar_chamados_agendamento()
-
 if not chamados:
     st.warning("Nenhum chamado encontrado no momento.")
 else:
     agrupados = agrupar_por_loja(chamados)
-    st.success(f"{len(chamados)} chamados encontrados.")
+    st.success(f"{len(chamados)} chamados encontrados. Agrupados por {len(agrupados)} loja(s).")
 
     for loja, lista_chamados in agrupados.items():
         with st.expander(f"Loja {loja} - {len(lista_chamados)} chamado(s)", expanded=True):
@@ -106,4 +103,4 @@ else:
             st.code(mensagem, language="text")
 
 st.markdown("---")
-st.caption(f"🕒 Última atualização: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
