@@ -5,45 +5,18 @@ from requests.auth import HTTPBasicAuth
 from datetime import datetime
 from collections import defaultdict
 import json
-import streamlit.components.v1 as components
 
-# Configurações iniciais
+# --- Configurações e autenticação ---
 st.set_page_config(page_title="Chamados em Agendamento", layout="wide")
-st_autorefresh(interval=60 * 1000, key="auto_refresh")  # Atualiza a cada 60s
+st_autorefresh(interval=60 * 1000, key="auto_refresh")
 
-# Permissão para notificações
-components.html("""
-    <script>
-        function solicitarPermissao() {
-            if (Notification.permission !== "granted") {
-                Notification.requestPermission().then(function(permission) {
-                    if (permission === "granted") {
-                        alert("Permissão concedida para notificações.");
-                    }
-                });
-            } else {
-                alert("Notificações já estão permitidas.");
-            }
-        }
-
-        const botao = document.createElement("button");
-        botao.innerText = "🔔 Ativar Notificações";
-        botao.style.fontSize = "16px";
-        botao.style.padding = "10px 20px";
-        botao.onclick = solicitarPermissao;
-        document.body.prepend(botao);
-    </script>
-""", height=0)
-
-# Autenticação
 EMAIL = st.secrets["EMAIL"]
 API_TOKEN = st.secrets["API_TOKEN"]
 JIRA_URL = "https://delfia.atlassian.net"
 AUTH = HTTPBasicAuth(EMAIL, API_TOKEN)
 HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
-# Funções
-@st.cache_resource(show_spinner=False)
+# --- Funções reutilizáveis ---
 def buscar_chamados(jql):
     params = {"jql": jql, "maxResults": 100, "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948"}
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=params)
@@ -52,25 +25,46 @@ def buscar_chamados(jql):
 def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
-        blocos.append(f"*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
-    blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
+        blocos.append(
+            f"*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****"
+        )
+    blocos.append(
+        f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}"
+    )
     return "\n".join(blocos)
 
-# Estado para notificação
-if "ultimos_chamados" not in st.session_state:
-    st.session_state.ultimos_chamados = []
-
-# Página principal
+# --- Página principal ---
 st.title("📡 Chamados em Agendamento")
 
+# Solicita permissão e adiciona som
+st.markdown("""
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        Notification.requestPermission();
+    });
+    function playSound() {
+        const audio = new Audio("https://www.soundjay.com/buttons/sounds/button-3.mp3");
+        audio.play();
+    }
+    </script>
+""", unsafe_allow_html=True)
+
+# Buscar chamados
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
-novos_chamados = [c for c in chamados if c["key"] not in st.session_state.ultimos_chamados]
 
-# Notifica se houver novos
-if novos_chamados:
-    st.markdown(f"<script>if (Notification.permission === 'granted') new Notification('🔔 {len(novos_chamados)} novo(s) chamado(s) em AGENDAMENTO!');</script>", unsafe_allow_html=True)
+if "prev_count" not in st.session_state:
+    st.session_state.prev_count = 0
 
-st.session_state.ultimos_chamados = [c["key"] for c in chamados]  # Atualiza histórico
+novo_total = len(chamados)
+if novo_total > st.session_state.prev_count:
+    st.markdown("""
+        <script>
+        new Notification("🔔 Novo chamado em AGENDAMENTO!");
+        playSound();
+        </script>
+    """, unsafe_allow_html=True)
+
+st.session_state.prev_count = novo_total
 
 if not chamados:
     st.warning("Nenhum chamado encontrado no momento.")
@@ -99,4 +93,52 @@ else:
 st.markdown("---")
 st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
-# Você ainda pode manter a seção de atualização TEC-CAMPO abaixo, se desejar
+# --- Seção extra: Atualizar chamados TEC-CAMPO ---
+st.header("🔧 Atualizar chamados TEC-CAMPO por loja")
+
+with st.form("atualizar_form"):
+    loja_input = st.text_input("Digite o código da loja (ex: L370):")
+    data_inicio = st.text_input("Data/Hora Início (ex: 2025-05-20T20:00:00.000-0300):")
+    data_fim = st.text_input("Data/Hora Fim (ex: 2025-05-20T20:30:00.000-0300):")
+    data_agendamento = st.text_input("Data de Agendamento (ex: 2025-05-20T09:51:00.000-0300):")
+    custo_visita = st.number_input("Custo da Visita (padrão: 120.0)", value=120.0)
+    num_visita = st.number_input("Número de Visita", value=1)
+    confirmar = st.form_submit_button("🔁 Buscar e Preparar Atualização")
+
+if confirmar and loja_input and data_inicio and data_fim and data_agendamento:
+    jql = f'project = FSA AND status = "TEC-CAMPO" AND text ~ "{loja_input}"'
+    tec_chamados = buscar_chamados(jql)
+
+    encontrados = []
+    for ch in tec_chamados:
+        loja_real = ch["fields"].get("customfield_14954", {}).get("value", "")
+        if loja_real == loja_input:
+            encontrados.append(ch)
+
+    if not encontrados:
+        st.warning("Nenhum chamado TEC-CAMPO encontrado para essa loja.")
+    else:
+        st.info(f"{len(encontrados)} chamados encontrados para a loja {loja_input}.")
+        edicoes = {}
+        for ch in encontrados:
+            with st.expander(f"Chamado {ch['key']}", expanded=True):
+                valor_individual = st.number_input(f"Custo específico para {ch['key']}", value=custo_visita, key=ch['key'])
+                edicoes[ch['key']] = valor_individual
+
+        if st.button("✅ Confirmar e Atualizar Todos"):
+            for ch in encontrados:
+                payload = {
+                    "fields": {
+                        "customfield_10702": data_inicio,
+                        "customfield_10703": data_fim,
+                        "customfield_12036": data_agendamento,
+                        "customfield_12413": edicoes[ch['key']],
+                        "customfield_12657": num_visita,
+                        "customfield_11958": edicoes[ch['key']]
+                    }
+                }
+                res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
+                if res.status_code == 204:
+                    st.success(f"✅ {ch['key']} atualizado com sucesso.")
+                else:
+                    st.error(f"❌ Erro ao atualizar {ch['key']}: {res.status_code}")
