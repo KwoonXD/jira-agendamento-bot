@@ -26,11 +26,9 @@ def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
         blocos.append(
-            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****"
-        )
+            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****""")
     blocos.append(
-        f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}"
-    )
+        f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}""")
     return "\n".join(blocos)
 
 # --- Página principal ---
