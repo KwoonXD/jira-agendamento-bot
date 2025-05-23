@@ -2,7 +2,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import requests
 from requests.auth import HTTPBasicAuth
-from datetime import datetime
+from datetime import datetime, date, time
 from collections import defaultdict
 import json
 
@@ -26,45 +26,17 @@ def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
         blocos.append(
-            f"*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****"
+            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****"
         )
     blocos.append(
-        f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}"
+        f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}"
     )
     return "\n".join(blocos)
 
 # --- Página principal ---
 st.title("📡 Chamados em Agendamento")
 
-# Solicita permissão e adiciona som
-st.markdown("""
-    <script>
-    document.addEventListener('DOMContentLoaded', function () {
-        Notification.requestPermission();
-    });
-    function playSound() {
-        const audio = new Audio("https://www.soundjay.com/buttons/sounds/button-3.mp3");
-        audio.play();
-    }
-    </script>
-""", unsafe_allow_html=True)
-
-# Buscar chamados
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
-
-if "prev_count" not in st.session_state:
-    st.session_state.prev_count = 0
-
-novo_total = len(chamados)
-if novo_total > st.session_state.prev_count:
-    st.markdown("""
-        <script>
-        new Notification("🔔 Novo chamado em AGENDAMENTO!");
-        playSound();
-        </script>
-    """, unsafe_allow_html=True)
-
-st.session_state.prev_count = novo_total
 
 if not chamados:
     st.warning("Nenhum chamado encontrado no momento.")
@@ -97,22 +69,41 @@ st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%
 st.header("🔧 Atualizar chamados TEC-CAMPO por loja")
 
 with st.form("atualizar_form"):
-    loja_input = st.text_input("Digite o código da loja (ex: L370):")
-    data_inicio = st.text_input("Data/Hora Início (ex: 2025-05-20T20:00:00.000-0300):")
-    data_fim = st.text_input("Data/Hora Fim (ex: 2025-05-20T20:30:00.000-0300):")
-    data_agendamento = st.text_input("Data de Agendamento (ex: 2025-05-20T09:51:00.000-0300):")
+    loja_input = st.text_input("Digite o código da loja (ex: L005, L024, Loja 5030):")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        data_inicio = st.date_input("Data Início", value=date.today())
+        hora_inicio = st.time_input("Hora Início", value=datetime.now().time())
+    with col2:
+        data_fim = st.date_input("Data Fim", value=date.today())
+        hora_fim = st.time_input("Hora Fim", value=datetime.now().time())
+    with col3:
+        data_agendamento = st.date_input("Data de Agendamento", value=date.today())
+        hora_agendamento = st.time_input("Hora Agendamento", value=datetime.now().time())
+
+    datetime_inicio = f"{data_inicio}T{hora_inicio}:00.000-0300"
+    datetime_fim = f"{data_fim}T{hora_fim}:00.000-0300"
+    datetime_agendamento = f"{data_agendamento}T{hora_agendamento}:00.000-0300"
+
     custo_visita = st.number_input("Custo da Visita (padrão: 120.0)", value=120.0)
     num_visita = st.number_input("Número de Visita", value=1)
     confirmar = st.form_submit_button("🔁 Buscar e Preparar Atualização")
 
-if confirmar and loja_input and data_inicio and data_fim and data_agendamento:
-    jql = f'project = FSA AND status = "TEC-CAMPO" AND text ~ "{loja_input}"'
+if confirmar and loja_input:
+    if loja_input.upper().startswith("LOJA"):
+        loja_term = loja_input.upper()
+    else:
+        numero = loja_input.replace("L", "").zfill(3)
+        loja_term = f"L{numero}"
+
+    jql = f'project = FSA AND status = "TEC-CAMPO" AND text ~ "{loja_term}"'
     tec_chamados = buscar_chamados(jql)
 
     encontrados = []
     for ch in tec_chamados:
         loja_real = ch["fields"].get("customfield_14954", {}).get("value", "")
-        if loja_real == loja_input:
+        if loja_real == loja_term or loja_real.upper() == loja_input.upper():
             encontrados.append(ch)
 
     if not encontrados:
@@ -129,9 +120,9 @@ if confirmar and loja_input and data_inicio and data_fim and data_agendamento:
             for ch in encontrados:
                 payload = {
                     "fields": {
-                        "customfield_10702": data_inicio,
-                        "customfield_10703": data_fim,
-                        "customfield_12036": data_agendamento,
+                        "customfield_10702": datetime_inicio,
+                        "customfield_10703": datetime_fim,
+                        "customfield_12036": datetime_agendamento,
                         "customfield_12413": edicoes[ch['key']],
                         "customfield_12657": num_visita,
                         "customfield_11958": edicoes[ch['key']]
