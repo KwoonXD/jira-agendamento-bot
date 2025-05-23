@@ -95,4 +95,9 @@ else:
             st.code(mensagem, language="text")
 
 st.markdown("---")
-st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+import pytz
+fuso_brasilia = pytz.timezone('America/Sao_Paulo')
+agora_brasilia = datetime.now(fuso_brasilia)
+st.caption(f"🕒 Última atualização automática: {agora_brasilia.strftime('%d/%m/%Y %H:%M:%S')}")
+
+
