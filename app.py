@@ -72,13 +72,13 @@ with st.form("atualizar_form"):
     col1, col2 = st.columns(2)
     with col1:
         data_inicio = st.date_input("Data Início", value=date.today())
-        hora_inicio = st.time_input("Hora Início", value=datetime.now().time())
+        hora_inicio = st.time_input("Hora Início", value=time(datetime.now().hour, datetime.now().minute))
     with col2:
         data_fim = st.date_input("Data Fim", value=date.today())
-        hora_fim = st.time_input("Hora Fim", value=datetime.now().time())
+        hora_fim = st.time_input("Hora Fim", value=time(datetime.now().hour, datetime.now().minute))
 
-    datetime_inicio = f"{data_inicio}T{hora_inicio.strftime('%H:%M:%S')}.000-0300"
-    datetime_fim = f"{data_fim}T{hora_fim.strftime('%H:%M:%S')}.000-0300"
+    datetime_inicio = f"{data_inicio}T{hora_inicio.strftime('%H:%M')}:00.000-0300"
+    datetime_fim = f"{data_fim}T{hora_fim.strftime('%H:%M')}:00.000-0300"
 
     custo_visita = st.number_input("Custo da Visita (padrão: 120.0)", value=120.0)
     num_visita = st.number_input("Número de Visita", value=1)
