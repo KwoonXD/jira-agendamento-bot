@@ -25,7 +25,7 @@ def buscar_chamados(jql):
 def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
-        blocos.append(f"*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
+        blocos.append(f"*{ch['key']}*\n*Loja:* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
     blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
@@ -111,10 +111,16 @@ if confirmar and loja_input:
     else:
         st.info(f"{len(encontrados)} chamados encontrados para a loja {loja_input}.")
         edicoes = {}
+        equipamentos = {}
+        descricoes = {}
+
         for ch in encontrados:
             with st.expander(f"Chamado {ch['key']}", expanded=True):
-                valor_individual = st.number_input(f"Custo específico para {ch['key']}", value=custo_visita, key=ch['key'])
-                edicoes[ch['key']] = valor_individual
+                valor_equip = st.number_input(f"Custo de Equipamento para {ch['key']}", value=0.0, key="equip_" + ch['key'])
+                valor_total = custo_visita + valor_equip
+                equipamentos[ch['key']] = valor_equip
+                edicoes[ch['key']] = valor_total
+                descricoes[ch['key']] = st.text_area(f"Descrição técnica (Problema/Peça/Tentativas) para {ch['key']}", height=150)
 
         if st.button("✅ Confirmar e Atualizar Todos"):
             for ch in encontrados:
@@ -124,7 +130,9 @@ if confirmar and loja_input:
                         "customfield_10703": datetime_fim,
                         "customfield_12413": edicoes[ch['key']],
                         "customfield_12657": num_visita,
-                        "customfield_11958": edicoes[ch['key']]
+                        "customfield_11958": edicoes[ch['key']],
+                        "customfield_14880": equipamentos[ch['key']],
+                        "customfield_12374": descricoes[ch['key']]
                     }
                 }
                 res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
