@@ -57,43 +57,32 @@ def agrupar_por_loja(chamados):
     return agrupado
 
 # --- Função para gerar mensagem no formato desejado ---
-def gerar_mensagem(loja, chamados):
-    cidade = chamados[0]["cidade"]
-    estado = chamados[0]["estado"]
-    cep = chamados[0]["cep"]
-    endereco = chamados[0]["endereco"]
-
-    if len(chamados) == 1:
-        ch = chamados[0]
-        return f"""
-*{ch['key']}*  
-*Loja:* {loja}  
-*PDV:* {ch['pdv']}  
-*ATIVO:* {ch['ativo']}  
-*Problema:* {ch['problema']}  
-***  
-
-*Endereço:* {endereco}  
-*Estado:* {estado}  
-*CEP:* {cep}  
-*Cidade:* {cidade}
-"""
-    else:
-        blocos = []
-        for ch in chamados:
-            blocos.append(
-f"""*{ch['key']}*  
-*Loja:* {loja}  
-*PDV:* {ch['pdv']}  
-*ATIVO:* {ch['ativo']}  
-*Problema:* {ch['problema']}  
-***"""
-            )
-        blocos.append(
-f"""*Endereço:* {endereco}  
-*Estado:* {estado}  
-*CEP:* {cep}  
-*Cidade:* {cidade}"""
+def exibir_mensagens(lojas):
+    for loja, dados in lojas.items():
+        chamados = dados["chamados"]
+        if len(chamados) == 1:
+            ch = chamados[0]
+            print(f"""*{ch['key']}*
+*Loja* {loja}
+*PDV:* {ch['pdv']}
+*ATIVO:* {ch['ativo']}
+*Problema:* {ch['problema']}
+*Endereço:* {dados['endereco']}
+*Estado:* {dados['estado']}
+*CEP:* {dados['cep']}
+*Cidade:* {dados['cidade']}""")
+        else:
+            for ch in chamados:
+                print(f"""*{ch['key']}*
+*Loja* {loja}
+*PDV:* {ch['pdv']}
+*ATIVO:* {ch['ativo']}
+*Problema:* {ch['problema']}
+******""")
+            print(f"""*Endereço:* {dados['endereco']}
+*Estado:* {dados['estado']}
+*CEP:* {dados['cep']}
+*Cidade:* {dados['cidade']}""")
         )
         return "\n\n".join(blocos)
 
