@@ -1,90 +1,109 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import requests
 from requests.auth import HTTPBasicAuth
-from collections import defaultdict
 from datetime import datetime
+from collections import defaultdict
 
-# Autenticação
+# --- Autenticação segura ---
 EMAIL = st.secrets["EMAIL"]
 API_TOKEN = st.secrets["API_TOKEN"]
 JIRA_URL = "https://delfia.atlassian.net"
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
 AUTH = HTTPBasicAuth(EMAIL, API_TOKEN)
-HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
-# Função para buscar chamados
-def buscar_chamados():
+# --- Atualização automática a cada 60s ---
+st_autorefresh(interval=60000, key="datarefresh")
+
+# --- Função para buscar chamados em AGENDAMENTO ---
+def buscar_chamados_agendamento():
     query = {
-        "jql": 'project = "FSA" AND status = "AGENDAMENTO"',
-        "maxResults": 100,
-        "fields": "customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11948,customfield_11993,customfield_11994"
+        'jql': 'project = "FSA" AND status = "AGENDAMENTO"',
+        'maxResults': 100,
+        'fields': 'summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11994,customfield_11948,customfield_11993'
     }
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=query)
-    if res.status_code != 200:
-        st.error(f"Erro: {res.status_code} - {res.text}")
-        return []
-    return res.json()["issues"]
 
-# Agrupar chamados por loja
+    if res.status_code != 200:
+        st.error(f"Erro ao buscar chamados: {res.status_code} - {res.text}")
+        return []
+
+    return res.json().get("issues", [])
+
+# --- Função para agrupar e formatar ---
 def agrupar_por_loja(chamados):
     agrupado = defaultdict(list)
+
     for issue in chamados:
-        f = issue["fields"]
-        loja = f.get("customfield_14954", {}).get("value", "Sem loja")
+        fields = issue["fields"]
+        loja = fields.get("customfield_14954", {}).get("value", "Sem Loja")
+
         agrupado[loja].append({
             "key": issue["key"],
-            "pdv": f.get("customfield_14829", "--"),
-            "ativo": f.get("customfield_14825", {}).get("value", "--"),
-            "problema": f.get("customfield_12374", "--"),
-            "endereco": f.get("customfield_12271", "--"),
-            "estado": f.get("customfield_11948", {}).get("value", "--"),
-            "cep": f.get("customfield_11993", "--"),
-            "cidade": f.get("customfield_11994", "--")
+            "pdv": fields.get("customfield_14829") or "--",
+            "ativo": fields.get("customfield_14825", {}).get("value", "--"),
+            "problema": fields.get("customfield_12374") or "--",
+            "endereco": fields.get("customfield_12271") or fields.get("customfield_11994", "--"),
+            "estado": fields.get("customfield_11948", {}).get("value", "--"),
+            "cep": fields.get("customfield_11993", "--"),
+            "cidade": fields.get("customfield_11994", "--")
         })
+
     return agrupado
 
-# Gerar texto formatado
+# --- Função para gerar mensagem ---
 def gerar_mensagem(loja, chamados):
+    cidade = chamados[0]["cidade"]
+    estado = chamados[0]["estado"]
+    cep = chamados[0]["cep"]
+    endereco = chamados[0]["endereco"]
+
     if len(chamados) == 1:
         ch = chamados[0]
-        return f"""*{ch['key']}*
+        return f"""
+*{ch['key']}*
 Loja {loja}
 PDV: {ch['pdv']}
 ATIVO: {ch['ativo']}
 Problema: {ch['problema']}
 
-Endereço: {ch['endereco']}
-Estado: {ch['estado']}
-CEP: {ch['cep']}
-Cidade: {ch['cidade']}
+Endereço: {endereco}
+Estado: {estado}
+CEP: {cep}
+Cidade: {cidade}
 """
     else:
-        blocos = "\n***\n".join([
-            f"""{ch['key']}
+        blocos = []
+        for ch in chamados:
+            blocos.append(f"""{ch['key']}
 Loja {loja}
 PDV: {ch['pdv']}
 ATIVO: {ch['ativo']}
-Problema: {ch['problema']}""" for ch in chamados
-        ])
-        final = f"""Endereço: {chamados[0]['endereco']}
-Estado: {chamados[0]['estado']}
-CEP: {chamados[0]['cep']}
-Cidade: {chamados[0]['cidade']}"""
-        return blocos + "\n***\n" + final
+Problema: {ch['problema']}
+***""")
+        blocos.append(f"Endereço: {endereco}\nEstado: {estado}\nCEP: {cep}\nCidade: {cidade}")
+        return "\n".join(blocos)
 
-# Interface do Streamlit
-st.set_page_config(page_title="Painel de Chamados", layout="wide")
+# --- Interface Streamlit ---
+st.set_page_config(page_title="Chamados em Agendamento", layout="wide")
 st.title("📡 Chamados em Agendamento")
 st.caption("Visualização em tempo real")
 
-if st.button("🔄 Atualizar Chamados"):
-    issues = buscar_chamados()
-    if not issues:
-        st.warning("Nenhum chamado encontrado.")
-    else:
-        agrupados = agrupar_por_loja(issues)
-        st.success(f"{len(issues)} chamados encontrados.")
-        for loja, chamados in agrupados.items():
-            with st.expander(f"Loja {loja} - {len(chamados)} chamado(s)", expanded=True):
-                st.code(gerar_mensagem(loja, chamados), language="text")
+chamados = buscar_chamados_agendamento()
 
-st.caption(f"⏰ Atualizado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+if not chamados:
+    st.warning("Nenhum chamado encontrado no momento.")
+else:
+    agrupados = agrupar_por_loja(chamados)
+    st.success(f"{len(chamados)} chamados encontrados.")
+
+    for loja, lista_chamados in agrupados.items():
+        with st.expander(f"Loja {loja} - {len(lista_chamados)} chamado(s)", expanded=True):
+            mensagem = gerar_mensagem(loja, lista_chamados)
+            st.code(mensagem, language="text")
+
+st.markdown("---")
+st.caption(f"🕒 Última atualização: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
