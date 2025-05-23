@@ -26,7 +26,7 @@ def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
         blocos.append(
-            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****""")
+            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
     blocos.append(
         f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}""")
     return "\n".join(blocos)
@@ -85,11 +85,19 @@ with st.form("atualizar_form"):
     confirmar = st.form_submit_button("🔁 Buscar e Preparar Atualização")
 
 if confirmar and loja_input:
-    if loja_input.upper().startswith("LOJA"):
-        loja_term = loja_input.upper()
-    else:
-        numero = loja_input.replace("L", "").zfill(3)
-        loja_term = f"L{numero}"
+    raw = loja_input.strip().replace("LOJA", "").replace("L", "")
+    try:
+        num = int(raw)
+        if num < 10:
+            loja_term = f"L00{num}"
+        elif num < 100:
+            loja_term = f"L0{num}"
+        elif num < 1000:
+            loja_term = f"L{num}"
+        else:
+            loja_term = f"Loja {num}"
+    except:
+        loja_term = loja_input.strip()
 
     jql = f'project = FSA AND status = "TEC-CAMPO" AND text ~ "{loja_term}"'
     tec_chamados = buscar_chamados(jql)
