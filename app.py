@@ -25,8 +25,10 @@ def buscar_chamados(jql):
 def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
-        blocos.append(f"*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
-    blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
+        blocos.append(
+            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****""")
+    blocos.append(
+        f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}""")
     return "\n".join(blocos)
 
 # --- Página principal ---
@@ -61,26 +63,22 @@ else:
 st.markdown("---")
 st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
-# --- Seção extra: Atualizar chamados TEC-CAMPO ---
+# --- Seção extra: Atualizar chamados TEC-CAMPO por loja ---
 st.header("🔧 Atualizar chamados TEC-CAMPO por loja")
 
 with st.form("atualizar_form"):
     loja_input = st.text_input("Digite o código da loja (ex: L005, L024, Loja 5030):")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         data_inicio = st.date_input("Data Início", value=date.today())
         hora_inicio = st.time_input("Hora Início", value=datetime.now().time())
     with col2:
         data_fim = st.date_input("Data Fim", value=date.today())
         hora_fim = st.time_input("Hora Fim", value=datetime.now().time())
-    with col3:
-        data_agendamento = st.date_input("Data de Agendamento", value=date.today())
-        hora_agendamento = st.time_input("Hora Agendamento", value=datetime.now().time())
 
     datetime_inicio = f"{data_inicio}T{hora_inicio.strftime('%H:%M:%S')}.000-0300"
     datetime_fim = f"{data_fim}T{hora_fim.strftime('%H:%M:%S')}.000-0300"
-    datetime_agendamento = f"{data_agendamento}T{hora_agendamento.strftime('%H:%M:%S')}.000-0300"
 
     custo_visita = st.number_input("Custo da Visita (padrão: 120.0)", value=120.0)
     num_visita = st.number_input("Número de Visita", value=1)
@@ -118,7 +116,6 @@ if confirmar and loja_input:
                     "fields": {
                         "customfield_10702": datetime_inicio,
                         "customfield_10703": datetime_fim,
-                        "customfield_12036": datetime_agendamento,
                         "customfield_12413": edicoes[ch['key']],
                         "customfield_12657": num_visita,
                         "customfield_11958": edicoes[ch['key']]
