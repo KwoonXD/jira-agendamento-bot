@@ -66,25 +66,36 @@ def gerar_mensagem(loja, chamados):
     if len(chamados) == 1:
         ch = chamados[0]
         return f"""
-*{ch['key']}*
-Loja {loja}
-PDV: {ch['pdv']}
-ATIVO:{ch['ativo']}
-Problema: {ch['problema']}
+*{ch['key']}*  
+*Loja:* {loja}  
+*PDV:* {ch['pdv']}  
+*ATIVO:* {ch['ativo']}  
+*Problema:* {ch['problema']}  
+***  
 
-Endereço: {endereco}
-Estado: {estado}
-CEP: {cep}
-Cidade: {cidade}
+*Endereço:* {endereco}  
+*Estado:* {estado}  
+*CEP:* {cep}  
+*Cidade:* {cidade}
 """
     else:
         blocos = []
         for ch in chamados:
             blocos.append(
-                f"{ch['key']}\nLoja {loja}\nPDV: {ch['pdv']}\nATIVO:{ch['ativo']}\nProblema: {ch['problema']}\n***"
+f"""*{ch['key']}*  
+*Loja:* {loja}  
+*PDV:* {ch['pdv']}  
+*ATIVO:* {ch['ativo']}  
+*Problema:* {ch['problema']}  
+***"""
             )
-        blocos.append(f"Endereço: {endereco}\nEstado: {estado}\nCEP: {cep}\nCidade: {cidade}")
-        return "\n".join(blocos)
+        blocos.append(
+f"""*Endereço:* {endereco}  
+*Estado:* {estado}  
+*CEP:* {cep}  
+*Cidade:* {cidade}"""
+        )
+        return "\n\n".join(blocos)
 
 # --- Interface visual ---
 st.title("📡 Chamados em Agendamento")
