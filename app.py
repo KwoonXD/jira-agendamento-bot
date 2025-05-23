@@ -25,14 +25,12 @@ def buscar_chamados(jql):
 def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
-        blocos.append(
-            f"""*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
-    blocos.append(
-        f"""*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}""")
+        blocos.append(f"*{ch['key']}*\n*Loja* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
+    blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
 # --- Página principal ---
-st.title("📡 Chamados em Agendamento")
+st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
 
