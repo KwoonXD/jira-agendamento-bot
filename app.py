@@ -18,7 +18,11 @@ HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 # --- Funções reutilizáveis ---
 def buscar_chamados(jql):
-    params = {"jql": jql, "maxResults": 100, "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948"}
+    params = {
+        "jql": jql,
+        "maxResults": 100,
+        "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948"
+    }
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=params)
     return res.json().get("issues", []) if res.status_code == 200 else []
 
@@ -29,47 +33,19 @@ def gerar_mensagem(loja, chamados):
     blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
-def transicionar_chamado(issue_key, nome_status_destino):
-    res = requests.get(
-        f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions",
-        headers=HEADERS,
-        auth=AUTH
-    )
-    if res.status_code != 200:
-        st.error(f"❌ Erro ao buscar transições de {issue_key}: {res.status_code}")
-        return False
-
-    transicoes = res.json().get("transitions", [])
-    transicao_destino = next((t for t in transicoes if t["to"]["name"].upper() == nome_status_destino.upper()), None)
-
-    if not transicao_destino:
-        st.warning(f"⚠️ Nenhuma transição encontrada para '{nome_status_destino}' no chamado {issue_key}")
-        return False
-
-    payload = {
-        "transition": {
-            "id": transicao_destino["id"]
-        }
-    }
-
-    transicao_res = requests.post(
-        f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions",
-        headers=HEADERS,
-        auth=AUTH,
-        data=json.dumps(payload)
-    )
-
-    return transicao_res.status_code == 204
+def transicionar_chamado(issue_key, transition_id):
+    url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions"
+    payload = {"transition": {"id": transition_id}}
+    res = requests.post(url, headers=HEADERS, auth=AUTH, data=json.dumps(payload))
+    return res.status_code == 204
 
 # --- Página principal ---
 st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
 
-if not chamados:
-    st.warning("Nenhum chamado encontrado no momento.")
-else:
-    agrupado = defaultdict(list)
+agrupado = defaultdict(list)
+if chamados:
     for issue in chamados:
         fields = issue["fields"]
         loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
@@ -84,11 +60,13 @@ else:
             "cidade": fields.get("customfield_11994", "--")
         })
 
+if chamados:
     st.success(f"{len(chamados)} chamados encontrados.")
-
     for loja, lista in agrupado.items():
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s)", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
+else:
+    st.warning("Nenhum chamado encontrado no momento.")
 
 st.markdown("---")
 st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
@@ -101,7 +79,7 @@ with st.form("agendamento_form"):
     data_agendamento = st.date_input("Data de Agendamento", value=date.today())
     hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
     tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
-    ja_tem_tecnico = st.checkbox("Já há técnico em campo para essa loja?")
+    tem_tec_em_campo = st.checkbox("Já tem técnico em campo?")
     confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
 if confirmar_agendamento:
@@ -110,6 +88,7 @@ if confirmar_agendamento:
     else:
         datetime_agendamento = f"{data_agendamento}T{hora_agendamento.strftime('%H:%M')}:00.000-0300"
         chamados_para_agendar = [ch for ch in agrupado[loja_agendamento]]
+
         for ch in chamados_para_agendar:
             payload = {
                 "fields": {
@@ -117,25 +96,22 @@ if confirmar_agendamento:
                     "customfield_12279": {
                         "type": "doc",
                         "version": 1,
-                        "content": [
-                            {
-                                "type": "paragraph",
-                                "content": [
-                                    {"type": "text", "text": tecnico_responsavel}
-                                ]
-                            }
-                        ]
+                        "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico_responsavel}]}]
                     }
                 }
             }
             res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
             if res.status_code == 204:
                 st.success(f"✅ {ch['key']} agendado com sucesso.")
-                if ja_tem_tecnico:
-                    sucesso = transicionar_chamado(ch["key"], "TEC-CAMPO")
-                    if sucesso:
-                        st.success(f"🔁 {ch['key']} movido para TEC-CAMPO.")
+                if tem_tec_em_campo:
+                    transicionou = transicionar_chamado(ch['key'], "9")  # Agendado
+                    if transicionou:
+                        transicionou_tec = transicionar_chamado(ch['key'], "10")  # Tec Campo
+                        if transicionou_tec:
+                            st.info(f"🔄 {ch['key']} movido para TEC-CAMPO.")
+                        else:
+                            st.error(f"⚠️ {ch['key']} não pôde ser movido para TEC-CAMPO.")
                     else:
-                        st.error(f"❌ Falha ao mover {ch['key']} para TEC-CAMPO.")
+                        st.error(f"⚠️ {ch['key']} não pôde ser movido para AGENDADO.")
             else:
                 st.error(f"❌ Falha ao agendar {ch['key']}: {res.status_code}")
