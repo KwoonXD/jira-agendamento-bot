@@ -18,7 +18,11 @@ HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 # --- Funções reutilizáveis ---
 def buscar_chamados(jql):
-    params = {"jql": jql, "maxResults": 100, "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948"}
+    params = {
+        "jql": jql,
+        "maxResults": 100,
+        "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948"
+    }
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=params)
     return res.json().get("issues", []) if res.status_code == 200 else []
 
@@ -33,27 +37,26 @@ def gerar_mensagem(loja, chamados):
 st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
+
 agrupado = defaultdict(list)
+for issue in chamados:
+    fields = issue["fields"]
+    loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    agrupado[loja].append({
+        "key": issue["key"],
+        "pdv": fields.get("customfield_14829", "--"),
+        "ativo": fields.get("customfield_14825", {}).get("value", "--"),
+        "problema": fields.get("customfield_12374", "--"),
+        "endereco": fields.get("customfield_12271", "--"),
+        "estado": fields.get("customfield_11948", {}).get("value", "--"),
+        "cep": fields.get("customfield_11993", "--"),
+        "cidade": fields.get("customfield_11994", "--")
+    })
 
 if not chamados:
     st.warning("Nenhum chamado encontrado no momento.")
 else:
-    for issue in chamados:
-        fields = issue["fields"]
-        loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-        agrupado[loja].append({
-            "key": issue["key"],
-            "pdv": fields.get("customfield_14829", "--"),
-            "ativo": fields.get("customfield_14825", {}).get("value", "--"),
-            "problema": fields.get("customfield_12374", "--"),
-            "endereco": fields.get("customfield_12271", "--"),
-            "estado": fields.get("customfield_11948", {}).get("value", "--"),
-            "cep": fields.get("customfield_11993", "--"),
-            "cidade": fields.get("customfield_11994", "--")
-        })
-
     st.success(f"{len(chamados)} chamados encontrados.")
-
     for loja, lista in agrupado.items():
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s)", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
@@ -66,9 +69,10 @@ st.header("📆 Agendar chamados de uma loja")
 
 with st.form("agendamento_form"):
     loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", sorted(agrupado.keys()))
-    data_agendamento = st.date_input("Data do Agendamento", value=date.today())
-    hora_agendamento = st.time_input("Hora do Agendamento", value=time(datetime.now().hour, datetime.now().minute))
+    data_agendamento = st.date_input("Data de Agendamento", value=date.today())
+    hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
     tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
+    tecnico_em_campo = st.checkbox("Já há técnico em campo nesta loja?")
     confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
 if confirmar_agendamento:
@@ -77,15 +81,57 @@ if confirmar_agendamento:
     else:
         datetime_agendamento = f"{data_agendamento}T{hora_agendamento.strftime('%H:%M')}:00.000-0300"
         chamados_para_agendar = [ch for ch in agrupado[loja_agendamento]]
+
         for ch in chamados_para_agendar:
+            # Passo 1: Atualiza campos de agendamento
             payload = {
                 "fields": {
                     "customfield_12036": datetime_agendamento,
                     "customfield_12279": tecnico_responsavel
                 }
             }
-            res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
+
+            res = requests.put(
+                f"{JIRA_URL}/rest/api/3/issue/{ch['key']}",
+                headers=HEADERS,
+                auth=AUTH,
+                data=json.dumps(payload)
+            )
+
             if res.status_code == 204:
                 st.success(f"✅ {ch['key']} agendado com sucesso.")
+
+                # Passo 2: Transição para "Agendado" (id 9)
+                transition_payload_agendado = {
+                    "transition": {"id": "9"}
+                }
+                res_agendado = requests.post(
+                    f"{JIRA_URL}/rest/api/3/issue/{ch['key']}/transitions",
+                    headers=HEADERS,
+                    auth=AUTH,
+                    data=json.dumps(transition_payload_agendado)
+                )
+
+                if res_agendado.status_code == 204:
+                    st.success(f"🟢 {ch['key']} movido para status Agendado.")
+
+                    # Passo 3: Se houver técnico em campo, transiciona para TEC-CAMPO (id 10)
+                    if tecnico_em_campo:
+                        transition_payload_teccampo = {
+                            "transition": {"id": "10"}
+                        }
+                        res_teccampo = requests.post(
+                            f"{JIRA_URL}/rest/api/3/issue/{ch['key']}/transitions",
+                            headers=HEADERS,
+                            auth=AUTH,
+                            data=json.dumps(transition_payload_teccampo)
+                        )
+
+                        if res_teccampo.status_code == 204:
+                            st.success(f"🔁 {ch['key']} movido para TEC-CAMPO.")
+                        else:
+                            st.error(f"⚠️ Falha ao mover {ch['key']} para TEC-CAMPO: {res_teccampo.status_code}")
+                else:
+                    st.error(f"⚠️ Falha ao mover {ch['key']} para Agendado: {res_agendado.status_code}")
             else:
                 st.error(f"❌ Falha ao agendar {ch['key']}: {res.status_code}")
