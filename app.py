@@ -29,22 +29,37 @@ def gerar_mensagem(loja, chamados):
     blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
-def formatar_tecnico_para_jira(nome_tecnico):
-    return {
-        "type": "doc",
-        "version": 1,
-        "content": [
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Técnico: {nome_tecnico}"
-                    }
-                ]
-            }
-        ]
+def transicionar_chamado(issue_key, nome_status_destino):
+    res = requests.get(
+        f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions",
+        headers=HEADERS,
+        auth=AUTH
+    )
+    if res.status_code != 200:
+        st.error(f"❌ Erro ao buscar transições de {issue_key}: {res.status_code}")
+        return False
+
+    transicoes = res.json().get("transitions", [])
+    transicao_destino = next((t for t in transicoes if t["to"]["name"].upper() == nome_status_destino.upper()), None)
+
+    if not transicao_destino:
+        st.warning(f"⚠️ Nenhuma transição encontrada para '{nome_status_destino}' no chamado {issue_key}")
+        return False
+
+    payload = {
+        "transition": {
+            "id": transicao_destino["id"]
+        }
     }
+
+    transicao_res = requests.post(
+        f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions",
+        headers=HEADERS,
+        auth=AUTH,
+        data=json.dumps(payload)
+    )
+
+    return transicao_res.status_code == 204
 
 # --- Página principal ---
 st.title("📱 Chamados em Agendamento")
@@ -86,6 +101,7 @@ with st.form("agendamento_form"):
     data_agendamento = st.date_input("Data de Agendamento", value=date.today())
     hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
     tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
+    ja_tem_tecnico = st.checkbox("Já há técnico em campo para essa loja?")
     confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
 if confirmar_agendamento:
@@ -98,11 +114,28 @@ if confirmar_agendamento:
             payload = {
                 "fields": {
                     "customfield_12036": datetime_agendamento,
-                    "customfield_12279": formatar_tecnico_para_jira(tecnico_responsavel)
+                    "customfield_12279": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [
+                                    {"type": "text", "text": tecnico_responsavel}
+                                ]
+                            }
+                        ]
+                    }
                 }
             }
             res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
             if res.status_code == 204:
                 st.success(f"✅ {ch['key']} agendado com sucesso.")
+                if ja_tem_tecnico:
+                    sucesso = transicionar_chamado(ch["key"], "TEC-CAMPO")
+                    if sucesso:
+                        st.success(f"🔁 {ch['key']} movido para TEC-CAMPO.")
+                    else:
+                        st.error(f"❌ Falha ao mover {ch['key']} para TEC-CAMPO.")
             else:
                 st.error(f"❌ Falha ao agendar {ch['key']}: {res.status_code}")
