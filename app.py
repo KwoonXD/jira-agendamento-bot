@@ -61,82 +61,31 @@ else:
 st.markdown("---")
 st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
-# --- Seção extra: Atualizar chamados TEC-CAMPO por loja ---
-st.header("🔧 Atualizar chamados TEC-CAMPO por loja")
+# --- Agendamento de chamados ---
+st.header("📆 Agendar chamados de uma loja")
 
-with st.form("atualizar_form"):
-    loja_input = st.text_input("Digite o código da loja (ex: L005, L024, Loja 5030):")
+with st.form("agendamento_form"):
+    loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", sorted(agrupado.keys()))
+    data_agendamento = st.date_input("Data de Agendamento", value=date.today())
+    hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
+    tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
+    confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        data_inicio = st.date_input("Data Início", value=date.today())
-        hora_inicio = st.time_input("Hora Início", value=time(datetime.now().hour, datetime.now().minute))
-    with col2:
-        data_fim = st.date_input("Data Fim", value=date.today())
-        hora_fim = st.time_input("Hora Fim", value=time(datetime.now().hour, datetime.now().minute))
-
-    datetime_inicio = f"{data_inicio}T{hora_inicio.strftime('%H:%M')}:00.000-0300"
-    datetime_fim = f"{data_fim}T{hora_fim.strftime('%H:%M')}:00.000-0300"
-
-    custo_visita = st.number_input("Custo da Visita (padrão: 120.0)", value=120.0)
-    num_visita = st.number_input("Número de Visita", value=1)
-    confirmar = st.form_submit_button("🔁 Buscar e Preparar Atualização")
-
-if confirmar and loja_input:
-    raw = loja_input.strip().replace("LOJA", "").replace("L", "")
-    try:
-        num = int(raw)
-        if num < 10:
-            loja_term = f"L00{num}"
-        elif num < 100:
-            loja_term = f"L0{num}"
-        elif num < 1000:
-            loja_term = f"L{num}"
-        else:
-            loja_term = f"Loja {num}"
-    except:
-        loja_term = loja_input.strip()
-
-    jql = f'project = FSA AND status = "TEC-CAMPO" AND text ~ "{loja_term}"'
-    tec_chamados = buscar_chamados(jql)
-
-    encontrados = []
-    for ch in tec_chamados:
-        loja_real = ch["fields"].get("customfield_14954", {}).get("value", "")
-        if loja_real == loja_term or loja_real.upper() == loja_input.upper():
-            encontrados.append(ch)
-
-    if not encontrados:
-        st.warning("Nenhum chamado TEC-CAMPO encontrado para essa loja.")
+if confirmar_agendamento:
+    if not tecnico_responsavel:
+        st.warning("Por favor, preencha o nome do técnico responsável.")
     else:
-        st.info(f"{len(encontrados)} chamados encontrados para a loja {loja_input}.")
-        edicoes = {}
-        equipamentos = {}
-        descricoes = {}
-
-        for ch in encontrados:
-            with st.expander(f"Chamado {ch['key']}", expanded=True):
-                valor_equip = st.number_input(f"Custo de Equipamento para {ch['key']}", value=0.0, key="equip_" + ch['key'])
-                valor_total = custo_visita + valor_equip
-                equipamentos[ch['key']] = valor_equip
-                edicoes[ch['key']] = valor_total
-                descricoes[ch['key']] = st.text_area(f"Descrição técnica (Problema/Peça/Tentativas) para {ch['key']}", height=150)
-
-        if st.button("✅ Confirmar e Atualizar Todos"):
-            for ch in encontrados:
-                payload = {
-                    "fields": {
-                        "customfield_10702": datetime_inicio,
-                        "customfield_10703": datetime_fim,
-                        "customfield_12413": edicoes[ch['key']],
-                        "customfield_12657": num_visita,
-                        "customfield_11958": edicoes[ch['key']],
-                        "customfield_14880": equipamentos[ch['key']],
-                        "customfield_12374": descricoes[ch['key']]
-                    }
+        datetime_agendamento = f"{data_agendamento}T{hora_agendamento.strftime('%H:%M')}:00.000-0300"
+        chamados_para_agendar = [ch for ch in agrupado[loja_agendamento]]
+        for ch in chamados_para_agendar:
+            payload = {
+                "fields": {
+                    "customfield_12036": datetime_agendamento,
+                    "customfield_12279": tecnico_responsavel
                 }
-                res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
-                if res.status_code == 204:
-                    st.success(f"✅ {ch['key']} atualizado com sucesso.")
-                else:
-                    st.error(f"❌ Erro ao atualizar {ch['key']}: {res.status_code}")
+            }
+            res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
+            if res.status_code == 204:
+                st.success(f"✅ {ch['key']} agendado com sucesso.")
+            else:
+                st.error(f"❌ Falha ao agendar {ch['key']}: {res.status_code}")
