@@ -33,11 +33,11 @@ def gerar_mensagem(loja, chamados):
 st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
+agrupado = defaultdict(list)
 
 if not chamados:
     st.warning("Nenhum chamado encontrado no momento.")
 else:
-    agrupado = defaultdict(list)
     for issue in chamados:
         fields = issue["fields"]
         loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
@@ -66,8 +66,8 @@ st.header("📆 Agendar chamados de uma loja")
 
 with st.form("agendamento_form"):
     loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", sorted(agrupado.keys()))
-    data_agendamento = st.date_input("Data de Agendamento", value=date.today())
-    hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
+    data_agendamento = st.date_input("Data do Agendamento", value=date.today())
+    hora_agendamento = st.time_input("Hora do Agendamento", value=time(datetime.now().hour, datetime.now().minute))
     tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
     confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
