@@ -5,6 +5,7 @@ from requests.auth import HTTPBasicAuth
 from datetime import datetime, date, time
 from collections import defaultdict
 import json
+import time as t
 
 # --- Configurações e autenticação ---
 st.set_page_config(page_title="Chamados em Agendamento", layout="wide")
@@ -29,27 +30,10 @@ def gerar_mensagem(loja, chamados):
     blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
-def obter_transicoes(issue_key):
+def transicionar_status(issue_key, transition_id):
     url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions"
-    res = requests.get(url, headers=HEADERS, auth=AUTH)
-    if res.status_code == 200:
-        return res.json().get("transitions", [])
-    return []
-
-def obter_id_transicao(issue_key, nome_transicao):
-    transicoes = obter_transicoes(issue_key)
-    for t in transicoes:
-        if t["name"].lower() == nome_transicao.lower():
-            return t["id"]
-    return None
-
-def transicionar_status(issue_key, nome_transicao):
-    id_transicao = obter_id_transicao(issue_key, nome_transicao)
-    if not id_transicao:
-        return False
-    url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions"
-    payload = {"transition": {"id": str(id_transicao)}}
-    res = requests.post(url, headers=HEADERS, auth=AUTH, json=payload)
+    payload = {"transition": {"id": str(transition_id)}}
+    res = requests.post(url, headers=HEADERS, auth=AUTH, data=json.dumps(payload))
     return res.status_code == 204
 
 # --- Página principal ---
@@ -57,11 +41,8 @@ st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
 
-if not chamados:
-    st.warning("Nenhum chamado encontrado no momento.")
-    agrupado = {}
-else:
-    agrupado = defaultdict(list)
+agrupado = defaultdict(list)
+if chamados:
     for issue in chamados:
         fields = issue["fields"]
         loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
@@ -76,8 +57,10 @@ else:
             "cidade": fields.get("customfield_11994", "--")
         })
 
+if not chamados:
+    st.warning("Nenhum chamado encontrado no momento.")
+else:
     st.success(f"{len(chamados)} chamados encontrados.")
-
     for loja, lista in agrupado.items():
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s)", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
@@ -89,20 +72,19 @@ st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%
 st.header("📆 Agendar chamados de uma loja")
 
 with st.form("agendamento_form"):
-    if agrupado:
-        loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", sorted(agrupado.keys()))
-        data_agendamento = st.date_input("Data de Agendamento", value=date.today())
-        hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
-        tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
-        com_tec_em_campo = st.checkbox("Já há técnico em campo nesta loja?")
-        confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
+    loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", sorted(agrupado.keys()))
+    data_agendamento = st.date_input("Data de Agendamento", value=date.today())
+    hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
+    tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
+    tecnico_em_campo = st.checkbox("✅ Já há técnico em campo nesta loja?")
+    confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
-if "confirmar_agendamento" in locals() and confirmar_agendamento:
+if confirmar_agendamento:
     if not tecnico_responsavel:
         st.warning("Por favor, preencha o nome do técnico responsável.")
     else:
         datetime_agendamento = f"{data_agendamento}T{hora_agendamento.strftime('%H:%M')}:00.000-0300"
-        chamados_para_agendar = agrupado.get(loja_agendamento, [])
+        chamados_para_agendar = [ch for ch in agrupado[loja_agendamento]]
         for ch in chamados_para_agendar:
             payload = {
                 "fields": {
@@ -111,7 +93,12 @@ if "confirmar_agendamento" in locals() and confirmar_agendamento:
                         "type": "doc",
                         "version": 1,
                         "content": [
-                            {"type": "paragraph", "content": [{"type": "text", "text": tecnico_responsavel}]}
+                            {
+                                "type": "paragraph",
+                                "content": [
+                                    {"type": "text", "text": tecnico_responsavel}
+                                ]
+                            }
                         ]
                     }
                 }
@@ -119,12 +106,13 @@ if "confirmar_agendamento" in locals() and confirmar_agendamento:
             res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
             if res.status_code == 204:
                 st.success(f"✅ {ch['key']} agendado com sucesso.")
-                transicionado = transicionar_status(ch['key'], "Agendado")
-                if com_tec_em_campo:
-                    transicionado &= transicionar_status(ch['key'], "TEC-CAMPO")
-                if transicionado:
-                    st.success(f"🔄 {ch['key']} transicionado com sucesso.")
-                else:
-                    st.warning(f"⚠️ {ch['key']} agendado, mas não foi possível transicionar status.")
+                if tecnico_em_campo:
+                    t.sleep(2)
+                    sucesso = transicionar_status(ch['key'], 10)  # ID 10 = TEC-CAMPO
+                    if sucesso:
+                        st.success(f"🔄 {ch['key']} movido para TEC-CAMPO.")
+                        st.markdown("<audio autoplay><source src='https://www.soundjay.com/buttons/sounds/button-3.mp3' type='audio/mpeg'></audio>", unsafe_allow_html=True)
+                    else:
+                        st.warning(f"⚠️ {ch['key']} agendado, mas não foi possível transicionar status.")
             else:
                 st.error(f"❌ Falha ao agendar {ch['key']}: {res.status_code}")
