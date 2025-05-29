@@ -42,11 +42,8 @@ def transicionar_status(issue_key, id_transicao):
 # --- Página principal ---
 st.title("📱 Chamados em Agendamento")
 
-# Filtros por data
-data_filtro = st.date_input("Filtrar chamados por data de agendamento (opcional)", value=None)
-data_str = data_filtro.strftime("%Y-%m-%d") if data_filtro else None
-
 # --- Chamados em AGENDAMENTO ---
+st.header("⏳ Chamados PENDENTES de Agendamento")
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
 
 agrupado = defaultdict(list)
@@ -61,14 +58,22 @@ for issue in chamados:
         "endereco": fields.get("customfield_12271", "--"),
         "estado": fields.get("customfield_11948", {}).get("value", "--"),
         "cep": fields.get("customfield_11993", "--"),
-        "cidade": fields.get("customfield_11994", "--")
+        "cidade": fields.get("customfield_11994", "--"),
+        "data_agendada": fields.get("customfield_12036", "")
     })
+
+# Filtros por data
+st.subheader("📅 Filtrar por data de Agendamento")
+data_filtro = st.date_input("Data desejada", value=None)
+data_str = data_filtro.strftime("%Y-%m-%d") if data_filtro else None
 
 if not chamados:
     st.warning("Nenhum chamado em AGENDAMENTO encontrado no momento.")
 else:
     st.success(f"{len(chamados)} chamados em AGENDAMENTO encontrados.")
     for loja, lista in agrupado.items():
+        if data_str and not any(ch.get("data_agendada", "").startswith(data_str) for ch in lista):
+            continue
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDAMENTO", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
 
