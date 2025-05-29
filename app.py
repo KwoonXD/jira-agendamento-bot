@@ -62,18 +62,11 @@ for issue in chamados:
         "data_agendada": fields.get("customfield_12036", "")
     })
 
-# Filtros por data
-st.subheader("📅 Filtrar por data de Agendamento")
-data_filtro = st.date_input("Data desejada", value=None)
-data_str = data_filtro.strftime("%Y-%m-%d") if data_filtro else None
-
 if not chamados:
     st.warning("Nenhum chamado em AGENDAMENTO encontrado no momento.")
 else:
     st.success(f"{len(chamados)} chamados em AGENDAMENTO encontrados.")
     for loja, lista in agrupado.items():
-        if data_str and not any(ch.get("data_agendada", "").startswith(data_str) for ch in lista):
-            continue
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDAMENTO", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
 
@@ -84,9 +77,6 @@ chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
 agrupado_agendado = defaultdict(list)
 for issue in chamados_agendados:
     fields = issue["fields"]
-    data_agendada = fields.get("customfield_12036")
-    if data_str and (not data_agendada or not data_agendada.startswith(data_str)):
-        continue
     loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
     agrupado_agendado[loja].append({
         "key": issue["key"],
@@ -100,7 +90,7 @@ for issue in chamados_agendados:
     })
 
 if not agrupado_agendado:
-    st.info("Nenhum chamado em AGENDADO com essa data.")
+    st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
     for loja, lista in agrupado_agendado.items():
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDADO", expanded=False):
