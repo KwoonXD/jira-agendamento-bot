@@ -44,29 +44,28 @@ st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
 
-if not chamados:
-    st.warning("Nenhum chamado em AGENDAMENTO encontrado no momento.")
-else:
-    agrupado = defaultdict(list)
-    for issue in chamados:
-        fields = issue["fields"]
-        loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-        agrupado[loja].append({
-            "key": issue["key"],
-            "pdv": fields.get("customfield_14829", "--"),
-            "ativo": fields.get("customfield_14825", {}).get("value", "--"),
-            "problema": fields.get("customfield_12374", "--"),
-            "endereco": fields.get("customfield_12271", "--"),
-            "estado": fields.get("customfield_11948", {}).get("value", "--"),
-            "cep": fields.get("customfield_11993", "--"),
-            "cidade": fields.get("customfield_11994", "--")
-        })
+agrupado = defaultdict(list)
+for issue in chamados:
+    fields = issue["fields"]
+    loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    agrupado[loja].append({
+        "key": issue["key"],
+        "pdv": fields.get("customfield_14829", "--"),
+        "ativo": fields.get("customfield_14825", {}).get("value", "--"),
+        "problema": fields.get("customfield_12374", "--"),
+        "endereco": fields.get("customfield_12271", "--"),
+        "estado": fields.get("customfield_11948", {}).get("value", "--"),
+        "cep": fields.get("customfield_11993", "--"),
+        "cidade": fields.get("customfield_11994", "--")
+    })
 
-    st.success(f"{len(chamados)} chamados em AGENDAMENTO encontrados.")
+st.success(f"{len(chamados)} chamados em AGENDAMENTO encontrados.")
 
-    for loja, lista in agrupado.items():
-        with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDAMENTO", expanded=False):
-            st.code(gerar_mensagem(loja, lista), language="text")
+lojas_disponiveis = sorted(agrupado.keys())
+for loja in lojas_disponiveis:
+    lista = agrupado[loja]
+    with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDAMENTO", expanded=False):
+        st.code(gerar_mensagem(loja, lista), language="text")
 
 # --- Chamados em AGENDADO ---
 chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
@@ -88,7 +87,9 @@ st.header("📋 Chamados AGENDADOS")
 if not chamados_agendados:
     st.info("Nenhum chamado em AGENDADO.")
 else:
-    for loja, lista in agrupado_agendado.items():
+    lojas_agendadas = sorted(agrupado_agendado.keys())
+    for loja in lojas_agendadas:
+        lista = agrupado_agendado[loja]
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDADO", expanded=False):
             for ch in lista:
                 data_formatada = "Data não informada"
@@ -107,7 +108,7 @@ else:
 st.header("📆 Agendar chamados de uma loja")
 
 with st.form("agendamento_form"):
-    loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", sorted(agrupado.keys()))
+    loja_agendamento = st.selectbox("Selecione a loja para agendar chamados:", lojas_disponiveis)
     data_agendamento = st.date_input("Data de Agendamento", value=date.today())
     hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
     tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
