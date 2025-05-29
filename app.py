@@ -19,7 +19,7 @@ HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 # --- Funções reutilizáveis ---
 def buscar_chamados(jql):
-    params = {"jql": jql, "maxResults": 100, "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948"}
+    params = {"jql": jql, "maxResults": 100, "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948,customfield_12036"}
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=params)
     return res.json().get("issues", []) if res.status_code == 200 else []
 
@@ -30,10 +30,13 @@ def gerar_mensagem(loja, chamados):
     blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
-def transicionar_status(issue_key, transition_id):
-    url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions"
-    payload = {"transition": {"id": str(transition_id)}}
-    res = requests.post(url, headers=HEADERS, auth=AUTH, data=json.dumps(payload))
+def transicionar_status(issue_key, id_transicao):
+    res = requests.post(
+        f"{JIRA_URL}/rest/api/3/issue/{issue_key}/transitions",
+        headers=HEADERS,
+        auth=AUTH,
+        json={"transition": {"id": str(id_transicao)}}
+    )
     return res.status_code == 204
 
 # --- Página principal ---
@@ -41,8 +44,10 @@ st.title("📱 Chamados em Agendamento")
 
 chamados = buscar_chamados("project = FSA AND status = AGENDAMENTO")
 
-agrupado = defaultdict(list)
-if chamados:
+if not chamados:
+    st.warning("Nenhum chamado em AGENDAMENTO encontrado no momento.")
+else:
+    agrupado = defaultdict(list)
     for issue in chamados:
         fields = issue["fields"]
         loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
@@ -57,16 +62,46 @@ if chamados:
             "cidade": fields.get("customfield_11994", "--")
         })
 
-if not chamados:
-    st.warning("Nenhum chamado encontrado no momento.")
-else:
-    st.success(f"{len(chamados)} chamados encontrados.")
+    st.success(f"{len(chamados)} chamados em AGENDAMENTO encontrados.")
+
     for loja, lista in agrupado.items():
-        with st.expander(f"Loja {loja} - {len(lista)} chamado(s)", expanded=False):
+        with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDAMENTO", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
 
-st.markdown("---")
-st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+# --- Chamados em AGENDADO ---
+chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
+
+agrupado_agendado = defaultdict(list)
+for issue in chamados_agendados:
+    fields = issue["fields"]
+    loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    data_agendada = fields.get("customfield_12036")
+    agrupado_agendado[loja].append({
+        "key": issue["key"],
+        "pdv": fields.get("customfield_14829", "--"),
+        "ativo": fields.get("customfield_14825", {}).get("value", "--"),
+        "problema": fields.get("customfield_12374", "--"),
+        "data": data_agendada,
+    })
+
+st.header("📋 Chamados AGENDADOS")
+if not chamados_agendados:
+    st.info("Nenhum chamado em AGENDADO.")
+else:
+    for loja, lista in agrupado_agendado.items():
+        with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDADO", expanded=False):
+            for ch in lista:
+                data_formatada = "Data não informada"
+                if ch["data"]:
+                    try:
+                        data_formatada = datetime.strptime(ch["data"][:16], "%Y-%m-%dT%H:%M").strftime("%d/%m/%Y %H:%M")
+                    except:
+                        data_formatada = ch["data"]
+                st.markdown(
+                    f"🔹 **{ch['key']}** | **PDV:** {ch['pdv']} | **Ativo:** {ch['ativo']}  \n"
+                    f"📆 Agendado para: `{data_formatada}`  \n"
+                    f"🛠️ *{ch['problema']}*"
+                )
 
 # --- Agendamento de chamados ---
 st.header("📆 Agendar chamados de uma loja")
@@ -76,7 +111,7 @@ with st.form("agendamento_form"):
     data_agendamento = st.date_input("Data de Agendamento", value=date.today())
     hora_agendamento = st.time_input("Hora de Agendamento", value=time(datetime.now().hour, datetime.now().minute))
     tecnico_responsavel = st.text_input("Nome do Técnico Responsável")
-    tecnico_em_campo = st.checkbox("✅ Já há técnico em campo nesta loja?")
+    tem_tec_campo = st.checkbox("Já tem técnico em campo?")
     confirmar_agendamento = st.form_submit_button("📌 Agendar Chamados")
 
 if confirmar_agendamento:
@@ -93,12 +128,7 @@ if confirmar_agendamento:
                         "type": "doc",
                         "version": 1,
                         "content": [
-                            {
-                                "type": "paragraph",
-                                "content": [
-                                    {"type": "text", "text": tecnico_responsavel}
-                                ]
-                            }
+                            {"type": "paragraph", "content": [{"type": "text", "text": tecnico_responsavel}]}
                         ]
                     }
                 }
@@ -106,13 +136,21 @@ if confirmar_agendamento:
             res = requests.put(f"{JIRA_URL}/rest/api/3/issue/{ch['key']}", headers=HEADERS, auth=AUTH, data=json.dumps(payload))
             if res.status_code == 204:
                 st.success(f"✅ {ch['key']} agendado com sucesso.")
-                if tecnico_em_campo:
-                    t.sleep(2)
-                    sucesso = transicionar_status(ch['key'], 10)  # ID 10 = TEC-CAMPO
-                    if sucesso:
-                        st.success(f"🔄 {ch['key']} movido para TEC-CAMPO.")
-                        st.markdown("<audio autoplay><source src='https://www.soundjay.com/buttons/sounds/button-3.mp3' type='audio/mpeg'></audio>", unsafe_allow_html=True)
-                    else:
-                        st.warning(f"⚠️ {ch['key']} agendado, mas não foi possível transicionar status.")
+                transicionado = transicionar_status(ch['key'], 9)  # ID 9: Agendado
+                if transicionado:
+                    st.success(f"➡️ {ch['key']} movido para 'Agendado'.")
+                    t.sleep(1.5)
+                    if tem_tec_campo:
+                        transicionado2 = transicionar_status(ch['key'], 10)  # ID 10: Tec Campo
+                        if transicionado2:
+                            st.success(f"🚚 {ch['key']} movido para 'Tec Campo'.")
+                        else:
+                            st.error(f"❌ Falha ao mover {ch['key']} para 'Tec Campo'.")
+                else:
+                    st.error(f"❌ Falha ao mover {ch['key']} para 'Agendado'.")
             else:
                 st.error(f"❌ Falha ao agendar {ch['key']}: {res.status_code}")
+
+# --- Rodapé ---
+st.markdown("---")
+st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
