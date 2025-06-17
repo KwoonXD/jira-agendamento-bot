@@ -31,20 +31,8 @@ def gerar_mensagem(loja, chamados):
     for ch in chamados:
         data_agendada = ch.get('data_agendada')
         data_formatada = datetime.strptime(data_agendada, "%Y-%m-%dT%H:%M:%S.%f%z").strftime('%d/%m/%Y %H:%M') if data_agendada else '--'
-        blocos.append(
-            f"*{ch['key']}*\n"
-            f"*Loja:* {loja}\n"
-            f"*PDV:* {ch['pdv']}\n"
-            f"*ATIVO:* {ch['ativo']}\n"
-            f"*Problema:* {ch['problema']}\n"
-            f"*Data Agendada:* {data_formatada}\n*****"
-        )
-    blocos.append(
-        f"*Endereço:* {chamados[0]['endereco']}\n"
-        f"*Estado:* {chamados[0]['estado']}\n"
-        f"*CEP:* {chamados[0]['cep']}\n"
-        f"*Cidade:* {chamados[0]['cidade']}"
-    )
+        blocos.append(f"*{ch['key']}*\n*Loja:* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*Data Agendada:* {data_formatada}\n*****")
+    blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
 def transicionar_status(issue_key, id_transicao):
@@ -91,11 +79,12 @@ else:
 st.header("📋 Chamados AGENDADOS")
 chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
 
-agrupado_agendado = defaultdict(list)
+agrupado_agendado = defaultdict(lambda: defaultdict(list))
 for issue in chamados_agendados:
     fields = issue["fields"]
     loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    agrupado_agendado[loja].append({
+    data_agendada = fields.get("customfield_12036", "")
+    agrupado_agendado[loja][data_agendada].append({
         "key": issue["key"],
         "pdv": fields.get("customfield_14829", "--"),
         "ativo": fields.get("customfield_14825", {}).get("value", "--"),
@@ -104,22 +93,28 @@ for issue in chamados_agendados:
         "estado": fields.get("customfield_11948", {}).get("value", "--"),
         "cep": fields.get("customfield_11993", "--"),
         "cidade": fields.get("customfield_11994", "--"),
-        "data_agendada": fields.get("customfield_12036", "")
+        "data_agendada": data_agendada
     })
 
 if not agrupado_agendado:
     st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
-    for loja, lista in agrupado_agendado.items():
-        com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}')
-        if com_spare:
-            aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
-        else:
-            aviso = "✅ Sem chamados em Aguardando Spare para esta loja."
+    for loja, por_data in agrupado_agendado.items():
+        for data, lista in sorted(por_data.items()):
+            com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}')
+            if com_spare:
+                aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
+            else:
+                aviso = "✅ Sem chamados em Aguardando Spare para esta loja."
 
-        with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDADO", expanded=False):
-            st.code(gerar_mensagem(loja, lista), language="text")
-            st.markdown(aviso)
+            try:
+                data_fmt = datetime.strptime(data, "%Y-%m-%dT%H:%M:%S.%f%z").strftime('%d/%m/%Y %H:%M')
+            except:
+                data_fmt = "Data desconhecida"
+
+            with st.expander(f"Loja {loja} - Agendado para {data_fmt} - {len(lista)} chamado(s)", expanded=False):
+                st.code(gerar_mensagem(loja, lista), language="text")
+                st.markdown(aviso)
 
 # --- Rodapé ---
 st.markdown("---")
