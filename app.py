@@ -79,12 +79,20 @@ else:
 st.header("📋 Chamados AGENDADOS")
 chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
 
-agrupado_agendado = defaultdict(lambda: defaultdict(list))
+agrupado_por_data = defaultdict(lambda: defaultdict(list))
+
 for issue in chamados_agendados:
     fields = issue["fields"]
     loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    data_agendada = fields.get("customfield_12036", "")
-    agrupado_agendado[loja][data_agendada].append({
+    data_agendada = fields.get("customfield_12036", None)
+    data_formatada = "Não definida"
+    if data_agendada:
+        try:
+            data_formatada = datetime.strptime(data_agendada, "%Y-%m-%dT%H:%M:%S.%f%z").strftime('%d/%m/%Y')
+        except:
+            data_formatada = "Erro data"
+
+    agrupado_por_data[data_formatada][loja].append({
         "key": issue["key"],
         "pdv": fields.get("customfield_14829", "--"),
         "ativo": fields.get("customfield_14825", {}).get("value", "--"),
@@ -96,23 +104,19 @@ for issue in chamados_agendados:
         "data_agendada": data_agendada
     })
 
-if not agrupado_agendado:
+if not agrupado_por_data:
     st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
-    for loja, por_data in agrupado_agendado.items():
-        for data, lista in sorted(por_data.items()):
+    for data_str, lojas in sorted(agrupado_por_data.items()):
+        st.subheader(f"📅 Data Agendada: {data_str} ({sum(len(v) for v in lojas.values())} chamado(s))")
+        for loja, lista in lojas.items():
             com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}')
             if com_spare:
                 aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
             else:
                 aviso = "✅ Sem chamados em Aguardando Spare para esta loja."
 
-            try:
-                data_fmt = datetime.strptime(data, "%Y-%m-%dT%H:%M:%S.%f%z").strftime('%d/%m/%Y %H:%M')
-            except:
-                data_fmt = "Data desconhecida"
-
-            with st.expander(f"Loja {loja} - Agendado para {data_fmt} - {len(lista)} chamado(s)", expanded=False):
+            with st.expander(f"Loja {loja} - {len(lista)} chamado(s)", expanded=False):
                 st.code(gerar_mensagem(loja, lista), language="text")
                 st.markdown(aviso)
 
