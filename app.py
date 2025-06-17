@@ -80,10 +80,12 @@ st.header("📋 Chamados AGENDADOS")
 chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
 
 agrupado_por_data = defaultdict(lambda: defaultdict(list))
+lojas_unicas = set()
 
 for issue in chamados_agendados:
     fields = issue["fields"]
     loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    lojas_unicas.add(loja)
     data_agendada = fields.get("customfield_12036", None)
     data_formatada = "Não definida"
     if data_agendada:
@@ -104,12 +106,22 @@ for issue in chamados_agendados:
         "data_agendada": data_agendada
     })
 
+# Filtro por loja
+loja_filtro = st.selectbox("🔍 Filtrar chamados AGENDADOS por loja:", options=["Todas"] + sorted(lojas_unicas))
+
 if not agrupado_por_data:
     st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
     for data_str, lojas in sorted(agrupado_por_data.items()):
-        st.subheader(f"📅 Data Agendada: {data_str} ({sum(len(v) for v in lojas.values())} chamado(s))")
+        total_por_data = sum(len(v) for k, v in lojas.items() if loja_filtro == "Todas" or k == loja_filtro)
+        if total_por_data == 0:
+            continue
+
+        st.subheader(f"📅 Data Agendada: {data_str} ({total_por_data} chamado(s))")
         for loja, lista in lojas.items():
+            if loja_filtro != "Todas" and loja != loja_filtro:
+                continue
+
             com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}')
             if com_spare:
                 aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
