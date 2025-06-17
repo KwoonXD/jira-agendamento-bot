@@ -2,10 +2,9 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import requests
 from requests.auth import HTTPBasicAuth
-from datetime import datetime, date, time
+from datetime import datetime
 from collections import defaultdict
 import json
-import time as t
 
 # --- Configurações e autenticação ---
 st.set_page_config(page_title="Chamados em Agendamento", layout="wide")
@@ -19,7 +18,11 @@ HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 # --- Funções reutilizáveis ---
 def buscar_chamados(jql):
-    params = {"jql": jql, "maxResults": 100, "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948,customfield_12036"}
+    params = {
+        "jql": jql,
+        "maxResults": 100,
+        "fields": "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,customfield_12271,customfield_11993,customfield_11994,customfield_11948,customfield_12036"
+    }
     res = requests.get(f"{JIRA_URL}/rest/api/3/search", headers=HEADERS, auth=AUTH, params=params)
     return res.json().get("issues", []) if res.status_code == 200 else []
 
@@ -93,8 +96,16 @@ if not agrupado_agendado:
     st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
     for loja, lista in agrupado_agendado.items():
+        fsa_keys = [f["key"] for f in lista]
+        com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Loja" = "{loja}"')
+        if com_spare:
+            aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
+        else:
+            aviso = "✅ Sem chamados em Aguardando Spare para esta loja."
+
         with st.expander(f"Loja {loja} - {len(lista)} chamado(s) AGENDADO", expanded=False):
             st.code(gerar_mensagem(loja, lista), language="text")
+            st.markdown(aviso)
 
 # --- Rodapé ---
 st.markdown("---")
