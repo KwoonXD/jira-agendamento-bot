@@ -77,15 +77,16 @@ else:
 
 # --- Chamados em AGENDADO ---
 st.header("📋 Chamados AGENDADOS")
+
 chamados_agendados = buscar_chamados("project = FSA AND status = AGENDADO")
 
 agrupado_por_data = defaultdict(lambda: defaultdict(list))
-lojas_unicas = set()
+lojas_disponiveis = set()
 
 for issue in chamados_agendados:
     fields = issue["fields"]
     loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    lojas_unicas.add(loja)
+    lojas_disponiveis.add(loja)
     data_agendada = fields.get("customfield_12036", None)
     data_formatada = "Não definida"
     if data_agendada:
@@ -106,22 +107,24 @@ for issue in chamados_agendados:
         "data_agendada": data_agendada
     })
 
-# Filtro por loja
-loja_filtro = st.selectbox("🔍 Filtrar chamados AGENDADOS por loja:", options=["Todas"] + sorted(lojas_unicas))
+# --- Filtro de loja ---
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.subheader("📋 Chamados AGENDADOS")
+with col2:
+    loja_selecionada = st.selectbox("\U0001F50D Filtrar por loja:", ["Todas"] + sorted(lojas_disponiveis))
 
 if not agrupado_por_data:
     st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
     for data_str, lojas in sorted(agrupado_por_data.items()):
-        total_por_data = sum(len(v) for k, v in lojas.items() if loja_filtro == "Todas" or k == loja_filtro)
-        if total_por_data == 0:
+        total_chamados = sum(len(v) for k, v in lojas.items() if loja_selecionada == "Todas" or k == loja_selecionada)
+        if total_chamados == 0:
             continue
-
-        st.subheader(f"📅 Data Agendada: {data_str} ({total_por_data} chamado(s))")
+        st.subheader(f"📅 Data Agendada: {data_str} ({total_chamados} chamado(s))")
         for loja, lista in lojas.items():
-            if loja_filtro != "Todas" and loja != loja_filtro:
+            if loja_selecionada != "Todas" and loja != loja_selecionada:
                 continue
-
             com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}')
             if com_spare:
                 aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
