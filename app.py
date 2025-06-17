@@ -29,8 +29,19 @@ def buscar_chamados(jql):
 def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
-        blocos.append(f"*{ch['key']}*\n*Loja:* {loja}\n*PDV:* {ch['pdv']}\n*ATIVO:* {ch['ativo']}\n*Problema:* {ch['problema']}\n*****")
-    blocos.append(f"*Endereço:* {chamados[0]['endereco']}\n*Estado:* {chamados[0]['estado']}\n*CEP:* {chamados[0]['cep']}\n*Cidade:* {chamados[0]['cidade']}")
+        data_agendada = ch.get('data_agendada')
+        data_formatada = datetime.strptime(data_agendada, "%Y-%m-%dT%H:%M:%S.%f%z").strftime('%d/%m/%Y %H:%M') if data_agendada else '--'
+        blocos.append(f"*{ch['key']}*
+*Loja:* {loja}
+*PDV:* {ch['pdv']}
+*ATIVO:* {ch['ativo']}
+*Problema:* {ch['problema']}
+*Data Agendada:* {data_formatada}
+*****")
+    blocos.append(f"*Endereço:* {chamados[0]['endereco']}
+*Estado:* {chamados[0]['estado']}
+*CEP:* {chamados[0]['cep']}
+*Cidade:* {chamados[0]['cidade']}")
     return "\n".join(blocos)
 
 def transicionar_status(issue_key, id_transicao):
@@ -89,15 +100,15 @@ for issue in chamados_agendados:
         "endereco": fields.get("customfield_12271", "--"),
         "estado": fields.get("customfield_11948", {}).get("value", "--"),
         "cep": fields.get("customfield_11993", "--"),
-        "cidade": fields.get("customfield_11994", "--")
+        "cidade": fields.get("customfield_11994", "--"),
+        "data_agendada": fields.get("customfield_12036", "")
     })
 
 if not agrupado_agendado:
     st.info("Nenhum chamado em AGENDADO encontrado.")
 else:
     for loja, lista in agrupado_agendado.items():
-        fsa_keys = [f["key"] for f in lista]
-        com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Loja" = "{loja}"')
+        com_spare = buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}')
         if com_spare:
             aviso = f"⚠️ {len(com_spare)} chamado(s) em Aguardando Spare para esta loja: {', '.join(c['key'] for c in com_spare)}"
         else:
