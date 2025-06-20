@@ -2,7 +2,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 from utils.jira_api import JiraAPI
-from utils.messages import gerar_mensagem
+from utils.messages import gerar_mensagem, verificar_duplicidade
 from collections import defaultdict
 
 # Configuração inicial
@@ -41,7 +41,7 @@ with col_agendado:
     st.header("📋 Chamados AGENDADOS")
     chamados_agendados = jira.buscar_chamados("project = FSA AND status = AGENDADO", fields)
 
-    # Filtro avançado por loja na sidebar
+    # Filtros
     lojas_disponiveis = sorted({issue["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida") for issue in chamados_agendados})
     loja_filtro = st.sidebar.multiselect("🔍 Filtrar por loja:", ["Todas"] + lojas_disponiveis, default="Todas")
 
@@ -63,10 +63,20 @@ with col_agendado:
 
         st.subheader(f"📅 {data} ({total_chamados} chamados)")
         for loja, issues in lojas_filtradas.items():
-            with st.expander(f"{loja} - {len(issues)} chamado(s)", expanded=False):
-                chamados_detalhados = jira.agrupar_chamados(issues)[loja]
-                st.code(gerar_mensagem(loja, chamados_detalhados), language="text")
+            chamados_detalhados = jira.agrupar_chamados(issues)[loja]
+            duplicados = verificar_duplicidade(chamados_detalhados)
 
+            com_spare = jira.buscar_chamados(f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}', fields)
+            
+            # Alertas visuais
+            alertas = ""
+            if duplicados:
+                alertas += "🔴 Duplicidade detectada! "
+            if com_spare:
+                alertas += f"⚠️ {len(com_spare)} chamado(s) Aguardando Spare."
+
+            with st.expander(f"{loja} - {len(issues)} chamado(s) {alertas}", expanded=False):
+                st.code(gerar_mensagem(loja, chamados_detalhados), language="text")
 # Última atualização
 st.markdown("---")
 st.caption(f"🕒 Última atualização automática: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
