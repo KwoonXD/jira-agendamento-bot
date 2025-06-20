@@ -35,3 +35,24 @@ class JiraAPI:
                 "data_agendada": fields.get("customfield_12036", "")
             })
         return agrupado
+            def get_transitions(self, issue_key):
+        """Retorna lista de transições disponíveis para um chamado."""
+        res = requests.get(
+            f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions",
+            headers=self.headers,
+            auth=self.auth
+        )
+        if res.status_code == 200:
+            return res.json().get("transitions", [])
+        return []
+
+    def transicionar_status(self, issue_key, transition_id):
+        """Executa a transição de status no Jira."""
+        res = requests.post(
+            f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions",
+            headers=self.headers,
+            auth=self.auth,
+            json={"transition": {"id": str(transition_id)}}
+        )
+        return res.status_code == 204
+
