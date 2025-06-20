@@ -70,8 +70,18 @@ class JiraAPI:
         )
         return res.status_code == 204
 
-def get_issue(self, key):
-    res = requests.get(f"{self.jira_url}/rest/api/3/issue/{key}",
-                       headers=self.headers, auth=self.auth,
-                       params={"fields": "status"})
-    return res.json() if res.status_code == 200 else {}
+    def get_issue(self, issue_key):
+        """
+        Busca um chamado pelo key e retorna seu JSON,
+        filtrando só o campo status para podermos usar no undo.
+        """
+        res = requests.get(
+            f"{self.jira_url}/rest/api/3/issue/{issue_key}",
+            headers=self.headers,
+            auth=self.auth,
+            params={"fields": "status"}
+        )
+        if res.status_code == 200:
+            return res.json()
+        return {}
+
