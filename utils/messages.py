@@ -25,8 +25,9 @@ def verificar_duplicidade(chamados):
     seen = set()
     duplicados = set()
     for ch in chamados:
-        identificador = (ch['ativo'], ch['problema'])
+        identificador = (ch['pdv'], ch['ativo'])  # PDV e Ativo definem duplicidade agora
         if identificador in seen:
             duplicados.add(identificador)
         seen.add(identificador)
     return duplicados
+
