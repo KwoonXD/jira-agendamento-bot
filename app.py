@@ -75,7 +75,7 @@ with col_pend:
     else:
         for loja, issues in agrup.items():
             label = f"{loja} — {len(issues)} chamados"
-            with st.expander(label, expanded=True):
+            with st.expander(label, expanded=False):
                 st.code(gerar_mensagem(loja, issues), language="text")
                 # bulk select + transition
                 keys = [i["key"] for i in issues]
@@ -124,12 +124,14 @@ with col_age:
             )
             fsas_spare = [c["key"] for c in spare]
             alerts = []
-            if fsas_dup:    alerts.append(f"Dup: {', '.join(fsas_dup)}")
-            if fsas_spare:  alerts.append(f"Spare: {', '.join(fsas_spare)}")
+            if fsas_dup:
+                alerts.append(f"Dup: {', '.join(fsas_dup)}")
+            if fsas_spare:
+                alerts.append(f"Spare: {', '.join(fsas_spare)}")
             tag = f" [{' • '.join(alerts)}]" if alerts else ""
 
             label = f"{loja} — {len(issues)} chamados{tag}"
-            with st.expander(label, expanded=True):
+            with st.expander(label, expanded=False):
                 st.code(gerar_mensagem(loja, detalhes), language="text")
                 # bulk select + transition
                 keys = [c["key"] for c in detalhes]
