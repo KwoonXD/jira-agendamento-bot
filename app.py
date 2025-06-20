@@ -10,15 +10,11 @@ from utils.messages import gerar_mensagem, verificar_duplicidade
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
 
-# ── Botão manual de refresh ──
-if st.button("🔄 Atualizar agora"):
-    st.experimental_rerun()
-
 # ── Histórico de undo ──
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ── Instancia JiraAPI ──
+# ── Inicializa JiraAPI ──
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
@@ -90,7 +86,7 @@ with st.sidebar:
         default=fsas
     )
 
-    # 4) Escolha de transição e montagem de payload só com data (sem técnico)
+    # 4) Escolha de transição e montagem de payload só com data
     extra_fields = {}
     if selected:
         opts   = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
@@ -104,30 +100,21 @@ with st.sidebar:
             dt_str = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
             extra_fields["customfield_12036"] = dt_str
 
-    # 5) Botão que aplica a transição e exibe payload + erro
+    # 5) Botão que aplica a transição e exibe possíveis erros
     if st.button("Aplicar Transição"):
         prev = jira.get_issue(selected[0]).get("fields", {}).get("status", {}).get("name", "")
         erros = []
         for key in selected:
-            # debug payload
-            payload = {"transition": {"id": opts[choice]}}
-            if extra_fields:
-                payload["fields"] = extra_fields
-            st.json(payload)
-
-            # executar
             res = jira.transicionar_status(key, opts[choice], fields=extra_fields or None)
-            st.write(res.status_code, res.text)
             if res.status_code != 204:
                 erros.append(f"{key}: {res.status_code} – {res.text}")
-
-        if not erros:
-            st.success(f"{len(selected)} FSAs movidos → {choice}")
-            st.session_state.history.append({"keys": selected, "from": prev})
-        else:
-            st.error("Falhas ao transicionar.")
+        if erros:
+            st.error("Falhas ao transicionar:")
             for e in erros:
                 st.code(e)
+        else:
+            st.success(f"{len(selected)} FSAs movidos → {choice}")
+            st.session_state.history.append({"keys": selected, "from": prev})
 
     st.markdown("---")
     # filtro de loja para AGENDADOS (visualização)
