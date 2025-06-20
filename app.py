@@ -6,32 +6,32 @@ import pandas as pd
 import calendar
 
 # ── AUTENTICAÇÃO SIMPLES ──────────────────────────────────────────────────────
-# ── AUTENTICAÇÃO SIMPLES ──────────────────────────────────────────────────────
+# ── AUTENTICAÇÃO SIMPLES (COM st.form) ────────────────────────────────────────
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
     st.title("🔒 Login Necessário")
 
-    user = st.text_input("Usuário")
-    pwd  = st.text_input("Senha", type="password")
+    with st.form("login_form"):
+        user = st.text_input("Usuário")
+        pwd  = st.text_input("Senha", type="password")
+        submitted = st.form_submit_button("Entrar")
 
-    if st.button("Entrar"):
-        # limpa espaços em branco
+    if submitted:
         u = user.strip()
         p = pwd.strip()
-
-        # DEBUG (temporário): mostra no console do Streamlit
-        st.write(f"DEBUG: você digitou -> Usuário='{u}', Senha='{p}'")
-
-        # checa exato
+        # DEBUG
+        st.write(f"DEBUG: Usuário='{u}', Senha='{p}'")
         if u == "admwt" and p == "suporte#wt2025":
             st.session_state.authenticated = True
+            st.success("Login efetuado com sucesso! Recarregando…")
             st.experimental_rerun()
         else:
             st.error("Usuário ou senha incorretos")
 
     st.stop()
+
 
 
 # ── SIDEBAR: LOGOUT / REFRESH / UNDO / TRANSIÇÃO ──────────────────────────────
