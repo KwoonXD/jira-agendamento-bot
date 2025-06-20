@@ -6,7 +6,11 @@ from collections import defaultdict
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# --- Configurações iniciais ---
+# — Session state para histórico de ações (undo)
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+# — Configurações iniciais —
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=60_000, key="auto_refresh")
 
@@ -22,9 +26,28 @@ FIELDS = (
 )
 
 st.title("📱 Painel Field Service")
+
+# — Undo na sidebar —
+with st.sidebar:
+    if st.session_state.history:
+        if st.button("↩️ Desfazer última ação"):
+            action = st.session_state.history.pop()
+            reverted = []
+            for key in action["keys"]:
+                # busca transições atuais
+                trans = jira.get_transitions(key)
+                # encontra a transição que leva de volta ao status anterior
+                rev_id = next(
+                    (t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]),
+                    None
+                )
+                if rev_id and jira.transicionar_status(key, rev_id):
+                    reverted.append(key)
+            st.success(f"Desfeito: {len(reverted)} FSAs → {action['from']}")
+
 col_pend, col_age = st.columns(2)
 
-# ——— Pending (AGENDAMENTO) ———
+# — Pending (AGENDAMENTO) —
 with col_pend:
     st.header("⏳ Chamados AGENDAMENTO")
     pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
@@ -37,25 +60,29 @@ with col_pend:
             with st.expander(f"{loja} — {len(issues)} chamados", expanded=False):
                 st.code(gerar_mensagem(loja, issues), language="text")
 
-                # bulk select + transition
+                # seleção em massa + transição
                 keys = [i["key"] for i in issues]
                 sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=f"pend_sel_{loja}")
                 if sel:
-                    tr = jira.get_transitions(keys[0])
-                    opts = {t["name"]: t["id"] for t in tr}
+                    trans = jira.get_transitions(keys[0])
+                    opts = {t["name"]: t["id"] for t in trans}
                     choice = st.selectbox("Transição:", ["—"] + list(opts), key=f"pend_tr_{loja}")
                     if choice != "—" and st.button("Aplicar em todos", key=f"pend_btn_{loja}"):
+                        # captura status atual (único para todos, pois estão em AGENDAMENTO)
+                        prev = jira.get_issue(sel[0])["fields"]["status"]["name"]
                         for k in sel:
                             jira.transicionar_status(k, opts[choice])
+                        # registra no histórico
+                        st.session_state.history.append({"keys": sel, "from": prev, "to": choice})
                         st.success(f"{len(sel)} FSAs movidos → {choice}")
 
-# ——— Scheduled (AGENDADOS) ———
+# — Scheduled (AGENDADOS) —
 with col_age:
     st.header("📋 Chamados AGENDADOS")
     agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
 
     # filtro de loja
-    lojas = sorted({iss["fields"].get("customfield_14954",{}).get("value","") for iss in agendados})
+    lojas = sorted({i["fields"].get("customfield_14954",{}).get("value","") for i in agendados})
     sel_lojas = st.sidebar.multiselect("Filtrar loja:", ["Todas"] + lojas, default=["Todas"])
 
     # agrupar por data e loja
@@ -64,12 +91,11 @@ with col_age:
         f = iss["fields"]
         loja = f.get("customfield_14954",{}).get("value","Loja Desconhecida")
         raw = f.get("customfield_12036")
-        date = (datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
-                .strftime("%d/%m/%Y")) if raw else "Não definida"
+        date = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y") if raw else "Não definida"
         grouped[date][loja].append(iss)
 
     for date, by_store in grouped.items():
-        total = sum(len(lst) for lst in by_store.values())
+        total = sum(len(v) for v in by_store.values())
         if total == 0:
             continue
         st.subheader(f"{date} — {total} chamados")
@@ -80,9 +106,10 @@ with col_age:
 
             detalhes = jira.agrupar_chamados(issues)[loja]
             dup = verificar_duplicidade(detalhes)
-            fsas_dup   = [c["key"] for c in detalhes if (c["pdv"], c["ativo"]) in dup]
-            spare_iss  = jira.buscar_chamados(
-                f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}',
+            fsas_dup = [c["key"] for c in detalhes if (c["pdv"], c["ativo"]) in dup]
+            spare_iss = jira.buscar_chamados(
+                f'project = FSA AND status = "Aguardando Spare" '
+                f'AND "Codigo da Loja[Dropdown]" = {loja}',
                 FIELDS
             )
             fsas_spare = [c["key"] for c in spare_iss]
@@ -99,12 +126,14 @@ with col_age:
                 keys = [c["key"] for c in detalhes]
                 sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=f"age_sel_{date}_{loja}")
                 if sel:
-                    tr = jira.get_transitions(keys[0])
-                    opts = {t["name"]: t["id"] for t in tr}
+                    trans = jira.get_transitions(keys[0])
+                    opts = {t["name"]: t["id"] for t in trans}
                     choice = st.selectbox("Transição:", ["—"] + list(opts), key=f"age_tr_{date}_{loja}")
                     if choice != "—" and st.button("Aplicar em todos", key=f"age_btn_{date}_{loja}"):
+                        prev = jira.get_issue(sel[0])["fields"]["status"]["name"]
                         for k in sel:
                             jira.transicionar_status(k, opts[choice])
+                        st.session_state.history.append({"keys": sel, "from": prev, "to": choice})
                         st.success(f"{len(sel)} FSAs movidos → {choice}")
 
 st.markdown("---")
