@@ -60,15 +60,24 @@ class JiraAPI:
             return res.json().get("transitions", [])
         return []
 
-    def transicionar_status(self, issue_key, transition_id):
-        """Executa a transição de status no Jira."""
+    def transicionar_status(self, issue_key, transition_id, fields=None):
+        """
+        Executa a transição de status no Jira.
+        Se 'fields' for passado, inclui no payload para preencher campos obrigatórios.
+        """
+        payload = {"transition": {"id": str(transition_id)}}
+        if fields:
+            payload["fields"] = fields
+
         res = requests.post(
             f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions",
             headers=self.headers,
             auth=self.auth,
-            json={"transition": {"id": str(transition_id)}}
+            json=payload
         )
         return res.status_code == 204
+
+    
 
     def get_issue(self, issue_key):
         """
