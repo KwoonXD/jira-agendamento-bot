@@ -6,7 +6,7 @@ from collections import defaultdict
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# ── Configuração da página e auto‐refresh (90s) ──
+# ── Configuração da página e auto‐refresh a cada 90 s ──
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
 
@@ -59,7 +59,8 @@ with st.sidebar:
             for key in action["keys"]:
                 trans  = jira.get_transitions(key)
                 rev_id = next(
-                    (t["id"] for t in trans if t.get("to",{}).get("name") == action["from"]),
+                    (t["id"] for t in trans
+                     if t.get("to",{}).get("name") == action["from"]),
                     None
                 )
                 if rev_id and jira.transicionar_status(key, rev_id):
@@ -71,7 +72,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("Transição de Chamados")
 
-    # 1) Seleção de loja (apenas as que têm pendentes)
+    # 1) Seleção de loja (só as que têm pendentes)
     lojas_pend = sorted(agrup_pend.keys())
     loja_sel   = st.selectbox("Loja:", ["—"] + lojas_pend, key="trans_store")
 
@@ -87,46 +88,48 @@ with st.sidebar:
     selected = st.multiselect(
         "FSAs (pend. + agend.):",
         options=fsas,
-        default=fsas if fsas else [],
+        default=fsas,
         key="trans_fsas"
     )
 
-    # 4) Selecione transição e preencha campos obrigatórios
+    # 4) Escolha de transição e campos obrigatórios
+    extra_fields = {}
     if selected:
         opts   = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
         choice = st.selectbox("Transição:", ["—"] + list(opts.keys()), key="trans_choice")
 
-        extra_fields = {}
-        # qualquer transição com "agend" no nome
         if choice and "agend" in choice.lower():
             st.markdown("**Preencha os campos obrigatórios**")
             data    = st.date_input("Data do Agendamento")
             hora    = st.time_input("Hora do Agendamento")
             tecnico = st.text_input("Técnico responsável")
-            # formata no padrão ISO + Zulu (aceito pelo Jira)
-            dt_str = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            # monta string no formato 2025-06-19T19:00:00.000-0300
+            dt_str = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
             extra_fields["customfield_12036"] = dt_str
             if tecnico:
-                # dropdown custom field espera objeto { "value": "Texto" }
                 extra_fields["customfield_12279"] = {"value": tecnico}
 
-        # 5) Botão aplica a transição
-        if st.button("Aplicar Transição"):
-            prev = jira.get_issue(selected[0]) \
-                       .get("fields", {}) \
-                       .get("status", {}) \
-                       .get("name", "")
-            for key in selected:
-                jira.transicionar_status(
-                    key,
-                    opts[choice],
-                    fields=extra_fields or None
-                )
+    # 5) Botão que aplica a transição e mostra erros
+    if st.button("Aplicar Transição"):
+        prev = jira.get_issue(selected[0]) \
+                   .get("fields", {}) \
+                   .get("status", {}) \
+                   .get("name", "")
+        erros = []
+        for key in selected:
+            res = jira.transicionar_status(key, opts[choice], fields=extra_fields or None)
+            if res.status_code != 204:
+                erros.append(f"{key}: {res.status_code} – {res.text}")
+        if erros:
+            st.error("Falhas ao transicionar:")
+            for e in erros:
+                st.code(e)
+        else:
             st.success(f"{len(selected)} FSAs movidos → {choice}")
             st.session_state.history.append({"keys": selected, "from": prev})
 
     st.markdown("---")
-    # filtro de loja para AGENDADOS
+    # filtro de loja para AGENDADOS (visualização)
     lojas_sched = sorted({l for stores in grouped_sched.values() for l in stores})
     st.multiselect(
         "Filtrar loja (AGENDADOS):",
