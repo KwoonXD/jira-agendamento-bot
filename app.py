@@ -18,7 +18,7 @@ if st.button("🔄 Atualizar agora"):
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ── Inicializa JiraAPI ──
+# ── Instancia JiraAPI ──
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
@@ -29,21 +29,21 @@ jira = JiraAPI(
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
-    "customfield_11994,customfield_11948,customfield_12036"
+    "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
 )
 
-# ── Busca de chamados ──
-pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-agrup_pend = jira.agrupar_chamados(pendentes)
+# ── Carrega chamados ──
+pendentes    = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
+agrup_pend   = jira.agrupar_chamados(pendentes)
 
-agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
+agendados    = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
 grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados:
-    f = issue["fields"]
-    loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    raw = f.get("customfield_12036")
-    date = (datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
-            .strftime("%d/%m/%Y")) if raw else "Não definida"
+    f     = issue["fields"]
+    loja  = f.get("customfield_14954",{}).get("value","Loja Desconhecida")
+    raw   = f.get("customfield_12036")
+    date  = (datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
+             .strftime("%d/%m/%Y %H:%M")) if raw else "Não definida"
     grouped_sched[date][loja].append(issue)
 
 # ── Sidebar ──
@@ -52,24 +52,23 @@ with st.sidebar:
     if st.button("↩️ Desfazer última ação"):
         if st.session_state.history:
             action = st.session_state.history.pop()
-            reverted = 0
+            count = 0
             for key in action["keys"]:
                 trans = jira.get_transitions(key)
                 rev_id = next(
-                    (t["id"] for t in trans
-                     if t.get("to", {}).get("name") == action["from"]),
+                    (t["id"] for t in trans 
+                     if t.get("to",{}).get("name") == action["from"]),
                     None
                 )
                 if rev_id and jira.transicionar_status(key, rev_id):
-                    reverted += 1
-            st.success(f"Revertido: {reverted} FSAs → {action['from']}")
+                    count += 1
+            st.success(f"Revertido: {count} FSAs → {action['from']}")
         else:
             st.info("Nenhuma ação para desfazer.")
 
     st.markdown("---")
     st.header("Transição de Chamados")
 
-    # formulário de transição
     with st.form("frm_transition"):
         # 1) Seleciona loja com pendentes
         lojas_pend = sorted(agrup_pend.keys())
@@ -99,12 +98,16 @@ with st.sidebar:
             opts = {t["name"]: t["id"] for t in trans}
             choice = st.selectbox("Transição:", ["—"] + list(opts.keys()), key="trans_choice")
 
-            # se for para “Agendamento”, pede data e hora
+            # se for para “Agendamento”, pede data/hora e técnico
             if choice == "Agendamento":
-                data = st.date_input("Data Agendada")
-                hora = st.time_input("Hora Agendada")
+                st.markdown("**Preencha os campos obrigatórios**")
+                data = st.date_input("Data do Agendamento")
+                hora = st.time_input("Hora do Agendamento")
+                tecnico = st.text_input("Técnico responsável", "")
                 iso = datetime.combine(data, hora).isoformat()
                 extra_fields["customfield_12036"] = iso
+                if tecnico:
+                    extra_fields["customfield_12279"] = tecnico
 
         submit = st.form_submit_button("Aplicar Transição")
         if submit and selected and choice and choice != "—":
@@ -155,6 +158,5 @@ with col2:
                 detalhe = jira.agrupar_chamados(issues)[loja]
                 st.code(gerar_mensagem(loja, detalhe), language="text")
 
-# ── Rodapé ──
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
