@@ -32,12 +32,12 @@ if not st.session_state.authenticated:
 
 # ── Inicializa JiraAPI ─────────────────────────────────────────────────────────
 jira = JiraAPI(
-    st.secrets["EMAIL"], 
-    st.secrets["API_TOKEN"], 
+    st.secrets["EMAIL"],
+    st.secrets["API_TOKEN"],
     "https://delfia.atlassian.net"
 )
 
-# ── Campos usados para leitura e transição ────────────────────────────────────
+# ── Campos usados para leitura/transição ──────────────────────────────────────
 FIELDS_FULL = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
@@ -64,7 +64,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("▶️ Transição em Massa")
-    # buscar pendentes e agendados completos
     pend_full = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS_FULL)
     age_full  = jira.buscar_chamados('project = FSA AND status = AGENDADO',    FIELDS_FULL)
 
@@ -84,7 +83,7 @@ with st.sidebar:
             choice = st.selectbox("Transição:", ["—"] + list(opts.keys()))
 
             extra = {}
-            # *Somente* se for Agendamento, exiba data/hora e técnico
+            # Campos de data/técnico só se for Agendamento
             if choice.lower().startswith("agend"):
                 st.markdown("**Dados de Agendamento**")
                 data = st.date_input("Data do Agendamento")
@@ -98,28 +97,23 @@ with st.sidebar:
                         "content":[{"type":"paragraph","content":[{"type":"text","text":tec}]}]
                     }
 
-            # Checkbox para enviar direto para Tec-Campo após a transição escolhida
             em_campo = st.checkbox("Após isto, mover para TEC-CAMPO")
 
             if choice != "—" and st.button("Aplicar Transição"):
                 prevs = []
                 for key in sel:
-                    # grava campos antes da transição
                     old = jira.buscar_chamados(f'issue={key}', FIELDS_FULL)[0]["fields"]
                     prevs.append(old)
-                    # 1) aplica a transição principal
                     jira.transicionar_status(key, opts[choice], fields=extra or None)
-                    # 2) se marcado, envia para Tec-Campo
                     if em_campo:
                         tr2 = jira.get_transitions(key)
                         tcid = next(
                             (t2["id"] for t2 in tr2 
-                             if "tec-campo" in t2.get("to",{}).get("name","").lower()), 
+                             if "tec-campo" in t2.get("to",{}).get("name","").lower()),
                             None
                         )
                         if tcid:
                             jira.transicionar_status(key, tcid)
-                # armazena no history para undo
                 st.session_state.history.append({
                     "keys": sel,
                     "prev_fields": prevs
@@ -129,7 +123,7 @@ with st.sidebar:
                     msg += " + TEC-CAMPO"
                 st.success(msg)
 
-# ── Busca e agrupamento para exibição ──────────────────────────────────────────
+# ── Busca e agrupamento ──────────────────────────────────────────────────────────
 pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS_FULL)
 agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO',    FIELDS_FULL)
 
@@ -143,7 +137,7 @@ for issue in agendados:
     date = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y") if raw else "Não definida"
     grouped[date][loja].append(issue)
 
-# ── Layout principal de lista ─────────────────────────────────────────────────
+# ── Layout principal ────────────────────────────────────────────────────────────
 st.title("📱 Painel Field Service")
 col1, col2 = st.columns(2)
 
