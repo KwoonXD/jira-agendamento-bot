@@ -41,7 +41,6 @@ with st.sidebar:
             action = st.session_state.history.pop()
             reverted = 0
             for key, prev_fields in zip(action["keys"], action["prev_fields"]):
-                # apenas reenvia os campos anteriores
                 jira.transicionar_status(key, None, fields=prev_fields)
                 reverted += 1
             st.success(f"Revertido: {reverted} FSAs")
@@ -62,7 +61,12 @@ with st.sidebar:
     loja_sel = st.selectbox("Loja:", ["—"] + sorted(by_store.keys()))
     if loja_sel != "—":
         keys = [i["key"] for i in by_store[loja_sel]]
-        sel  = st.multiselect("Selecionar FSAs:", keys)
+
+        # Novo: checkbox “Selecionar todos”
+        all_chk = st.checkbox("Selecionar todos os FSAs desta loja")
+        default_sel = keys if all_chk else []
+
+        sel = st.multiselect("Selecionar FSAs:", options=keys, default=default_sel)
         if sel:
             trans = jira.get_transitions(sel[0])
             opts  = {t["name"]: t["id"] for t in trans}
@@ -83,7 +87,6 @@ with st.sidebar:
             if choice != "—" and st.button("Aplicar Transição"):
                 prev_fields = []
                 for k in sel:
-                    # pega campos antes da transição para undo
                     old = jira.buscar_chamados(f'issue={k}', FIELDS_FULL)[0]["fields"]
                     prev_fields.append(old)
                     jira.transicionar_status(k, opts[choice], fields=extra or None)
