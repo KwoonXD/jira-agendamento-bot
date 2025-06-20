@@ -1,152 +1,118 @@
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 from collections import defaultdict
 
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# Inicializa histórico de undo
+# Configuração
+st.set_page_config(page_title="Painel Field Service", layout="wide")
+jira = JiraAPI(st.secrets["EMAIL"], st.secrets["API_TOKEN"], "https://delfia.atlassian.net")
+
+# Botão manual de refresh
+if st.button("🔄 Atualizar"):
+    st.experimental_rerun()
+
+# Histório para undo
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Configuração da página
-st.set_page_config(page_title="Painel Field Service", layout="wide")
-
-# Sidebar: desfazer última ação
+# Sidebar: desfazer
 st.sidebar.header("Ações")
-if st.sidebar.button("↩️ Desfazer última ação"):
-    if st.session_state.history:
-        action = st.session_state.history.pop()
-        reverted = 0
-        for key in action["keys"]:
-            trans = jira.get_transitions(key)
-            rev_id = next(
-                (t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]),
-                None
-            )
-            if rev_id and jira.transicionar_status(key, rev_id):
-                reverted += 1
-        st.sidebar.success(f"Revertido: {reverted} FSAs → {action['from']}")
-    else:
-        st.sidebar.info("Nenhuma ação para desfazer.")
+if st.sidebar.button("↩️ Desfazer última ação") and st.session_state.history:
+    action = st.session_state.history.pop()
+    reverted = 0
+    for key in action["keys"]:
+        trans = jira.get_transitions(key)
+        rev = next((t["id"] for t in trans if t["to"]["name"] == action["from"]), None)
+        if rev and jira.transicionar_status(key, rev):
+            reverted += 1
+    st.sidebar.success(f"Revertido: {reverted} → {action['from']}")
 
-# Sidebar: filtro de loja
+# Sidebar: filtro loja para agendados
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036"
 )
-jira = JiraAPI(st.secrets["EMAIL"], st.secrets["API_TOKEN"], "https://delfia.atlassian.net")
-all_agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
-lojas = sorted({
-    issue["fields"].get("customfield_14954", {}).get("value", "")
-    for issue in all_agendados
-})
-sel_lojas = st.sidebar.multiselect("Filtrar loja:", ["Todas"] + lojas, default=["Todas"])
+all_agendados = jira.buscar_chamados('project=FSA AND status=AGENDADO', FIELDS)
+lojas = sorted({i["fields"].get("customfield_14954",{}).get("value","") for i in all_agendados})
+sel_lojas = st.sidebar.multiselect("Filtrar loja:", ["Todas"]+lojas, default=["Todas"])
 
 st.title("📱 Painel Field Service")
-col_pend, col_age = st.columns(2)
+col1, col2 = st.columns(2)
 
-# — PENDENTES (AGENDAMENTO) —
-with col_pend:
-    st.header("⏳ Chamados AGENDAMENTO")
-    pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-    agrup_pend = jira.agrupar_chamados(pendentes)
-
-    if not pendentes:
-        st.warning("Nenhum chamado pendente de AGENDAMENTO.")
+# ── PENDENTES (AGENDAMENTO) ──
+with col1:
+    st.header("⏳ AGENDAMENTO")
+    pend = jira.buscar_chamados("project=FSA AND status=AGENDAMENTO", FIELDS)
+    grp = jira.agrupar_chamados(pend)
+    if not pend:
+        st.warning("Nenhum pendente.")
     else:
-        for loja, issues in agrup_pend.items():
-            key_show = f"show_pend_{loja}"
-            show = st.checkbox(
-                f"{loja} — {len(issues)} chamados",
-                value=st.session_state.get(key_show, False),
-                key=key_show
-            )
-            if show:
+        for loja, issues in grp.items():
+            key = f"pend_{loja}"
+            with st.expander(f"{loja} — {len(issues)} chamados", expanded=True, key=key):
                 st.code(gerar_mensagem(loja, issues), language="text")
-
-                # bulk select + transition
+                # bulk
                 keys = [i["key"] for i in issues]
-                sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=f"pend_sel_{loja}")
+                sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=key+"_sel")
                 if sel:
-                    trans = jira.get_transitions(keys[0])
-                    opts = {t["name"]: t["id"] for t in trans}
-                    choice = st.selectbox("Transição:", ["—"] + list(opts), key=f"pend_tr_{loja}")
-                    if choice != "—" and st.button("Aplicar em todos", key=f"pend_btn_{loja}"):
-                        issue_json = jira.get_issue(sel[0])
-                        prev = issue_json.get("fields", {}).get("status", {}).get("name", "")
+                    opts = {t["name"]:t["id"] for t in jira.get_transitions(keys[0])}
+                    choice = st.selectbox("Transição:", ["—"]+list(opts), key=key+"_tr")
+                    if choice!="—" and st.button("Aplicar em todos", key=key+"_btn"):
+                        prev = jira.get_issue(sel[0]).get("fields",{}).get("status",{}).get("name","")
                         for k in sel:
                             jira.transicionar_status(k, opts[choice])
-                        st.session_state.history.append({"keys": sel, "from": prev, "to": choice})
-                        st.success(f"{len(sel)} FSAs movidos → {choice}")
+                        st.session_state.history.append({"keys":sel,"from":prev})
+                        st.success(f"{len(sel)} → {choice}")
 
-# — AGENDADOS —
-with col_age:
-    st.header("📋 Chamados AGENDADOS")
-
-    # agrupa por data e loja
+# ── AGENDADOS ──
+with col2:
+    st.header("📋 AGENDADOS")
     grouped = defaultdict(lambda: defaultdict(list))
     for issue in all_agendados:
         f = issue["fields"]
-        loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+        loja = f.get("customfield_14954",{}).get("value","Loja Desconhecida")
         raw = f.get("customfield_12036")
-        date = (
-            datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
-            if raw else "Não definida"
-        )
+        date = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y") if raw else "Não definida"
         grouped[date][loja].append(issue)
 
     for date, by_store in grouped.items():
-        total = sum(len(lst) for lst in by_store.values())
-        if total == 0:
-            continue
+        total = sum(len(v) for v in by_store.values())
+        if total==0: continue
         st.subheader(f"{date} — {total} chamados")
-
         for loja, issues in by_store.items():
-            if "Todas" not in sel_lojas and loja not in sel_lojas:
-                continue
+            if "Todas" not in sel_lojas and loja not in sel_lojas: continue
 
             detalhes = jira.agrupar_chamados(issues)[loja]
             dup = verificar_duplicidade(detalhes)
-            fsas_dup = [c["key"] for c in detalhes if (c["pdv"], c["ativo"]) in dup]
+            fsas_dup = [c["key"] for c in detalhes if (c["pdv"],c["ativo"]) in dup]
             spare = jira.buscar_chamados(
-                f'project = FSA AND status = "Aguardando Spare" '
-                f'AND "Codigo da Loja[Dropdown]" = {loja}', FIELDS
+                f'project=FSA AND status="Aguardando Spare" AND "Codigo da Loja[Dropdown]"={loja}', 
+                FIELDS
             )
             fsas_spare = [c["key"] for c in spare]
-
             alerts = []
-            if fsas_dup:
-                alerts.append(f"Dup: {', '.join(fsas_dup)}")
-            if fsas_spare:
-                alerts.append(f"Spare: {', '.join(fsas_spare)}")
-            tag = f" [{' • '.join(alerts)}]" if alerts else ""
+            if fsas_dup:   alerts.append("Dup: "+", ".join(fsas_dup))
+            if fsas_spare: alerts.append("Spare: "+", ".join(fsas_spare))
+            tag = " ["+" • ".join(alerts)+"]" if alerts else ""
 
-            key_show = f"show_age_{date}_{loja}"
-            show = st.checkbox(
-                f"{loja} — {len(issues)} chamados{tag}",
-                value=st.session_state.get(key_show, False),
-                key=key_show
-            )
-            if show:
+            key = f"age_{date}_{loja}"
+            with st.expander(f"{loja} — {len(issues)} chamados"+tag, expanded=True, key=key):
                 st.code(gerar_mensagem(loja, detalhes), language="text")
-
-                # bulk select + transition
+                # bulk
                 keys = [c["key"] for c in detalhes]
-                sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=f"age_sel_{date}_{loja}")
+                sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=key+"_sel")
                 if sel:
-                    trans = jira.get_transitions(keys[0])
-                    opts = {t["name"]: t["id"] for t in trans}
-                    choice = st.selectbox("Transição:", ["—"] + list(opts), key=f"age_tr_{date}_{loja}")
-                    if choice != "—" and st.button("Aplicar em todos", key=f"age_btn_{date}_{loja}"):
-                        issue_json = jira.get_issue(sel[0])
-                        prev = issue_json.get("fields", {}).get("status", {}).get("name", "")
+                    opts = {t["name"]:t["id"] for t in jira.get_transitions(keys[0])}
+                    choice = st.selectbox("Transição:", ["—"]+list(opts), key=key+"_tr")
+                    if choice!="—" and st.button("Aplicar em todos", key=key+"_btn"):
+                        prev = jira.get_issue(sel[0]).get("fields",{}).get("status",{}).get("name","")
                         for k in sel:
                             jira.transicionar_status(k, opts[choice])
-                        st.session_state.history.append({"keys": sel, "from": prev, "to": choice})
-                        st.success(f"{len(sel)} FSAs movidos → {choice}")
+                        st.session_state.history.append({"keys":sel,"from":prev})
+                        st.success(f"{len(sel)} → {choice}")
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
