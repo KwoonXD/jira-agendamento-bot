@@ -1,37 +1,39 @@
+```python
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetimerom collections import defaultdict
+from datetime import datetime
+from collections import defaultdict
 
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# ── Configuração da página e auto‐refresh (90s) ─
+# ── Configuração da página e auto‐refresh (90s) ──
 st.set_page_config(page_title="Painel Field Service", layout="wide")
-st_autorefresh(interval=90_000, key="auto_refresh")  # 1m30s
+st_autorefresh(interval=90_000, key="auto_refresh")
 
-# ── Histórico de undo ─
+# ── Histórico de undo ──
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ── Instancia JiraAPI ─
+# ── Instancia JiraAPI ──
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
     "https://delfia.atlassian.net"
 )
 
-# ── Campos para busca ─
+# ── Campos para busca ──
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
 )
 
-# ── Carrega chamados ─
-pendentes  = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-agrup_pend = jira.agrupar_chamados(pendentes)
+# ── Carrega chamados ──
+pendentes    = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
+agrup_pend   = jira.agrupar_chamados(pendentes)
 
-agendados     = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
+agendados    = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
 grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados:
     f    = issue["fields"]
@@ -43,7 +45,7 @@ for issue in agendados:
     )
     grouped_sched[date][loja].append(issue)
 
-# ── Sidebar: Ações e Transição ─
+# ── Sidebar: Ações e Transição ──
 with st.sidebar:
     st.header("Ações")
     if st.button("↩️ Desfazer última ação"):
@@ -84,18 +86,17 @@ with st.sidebar:
         default=fsas
     )
 
-    # 4) Escolha de transição e campos obrigatórios
+    # 4) Escolha de transição e montagem de payload
     extra_fields = {}
     if selected:
         opts   = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
         choice = st.selectbox("Transição:", ["—"] + list(opts.keys()))
 
         if choice and "agend" in choice.lower():
-            st.markdown("**Preencha os campos obrigatórios**")
+            st.markdown("**Preencha a data/hora obrigatória**")
             data    = st.date_input("Data do Agendamento")
             hora    = st.time_input("Hora do Agendamento")
             tecnico = st.text_input("Dados dos Técnicos (Nome-CPF-RG-TEL)")
-            # monta no formato 2025-06-19T19:00:00.000-0300
             dt_str = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
             extra_fields["customfield_12036"] = dt_str
             if tecnico:
@@ -108,6 +109,7 @@ with st.sidebar:
         else:
             prev = jira.get_issue(selected[0]).get("fields", {}).get("status", {}).get("name", "")
             erros = []
+            opts  = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
             for key in selected:
                 res = jira.transicionar_status(key, opts[choice], fields=extra_fields or None)
                 if res.status_code != 204:
@@ -130,7 +132,7 @@ with st.sidebar:
         key="filter_sched"
     )
 
-# ── Main ─
+# ── Main ──
 st.title("📱 Painel Field Service")
 col1, col2 = st.columns(2)
 
@@ -160,3 +162,4 @@ with col2:
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+```
