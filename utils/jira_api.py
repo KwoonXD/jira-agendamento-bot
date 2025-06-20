@@ -22,15 +22,12 @@ class JiraAPI:
         for issue in chamados:
             fields = issue["fields"]
             loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-            ativo = fields.get("customfield_14825", {}).get("value", "--")
-            problema = fields.get("customfield_12374", "--")
-            pdv = fields.get("customfield_14829", "--")
 
             agrupado[loja].append({
                 "key": issue["key"],
-                "pdv": pdv,
-                "ativo": ativo,
-                "problema": problema,
+                "pdv": fields.get("customfield_14829", "--"),
+                "ativo": fields.get("customfield_14825", {}).get("value", "--"),
+                "problema": fields.get("customfield_12374", "--"),
                 "endereco": fields.get("customfield_12271", "--"),
                 "estado": fields.get("customfield_11948", {}).get("value", "--"),
                 "cep": fields.get("customfield_11993", "--"),
