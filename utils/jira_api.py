@@ -5,7 +5,10 @@ from collections import defaultdict
 class JiraAPI:
     def __init__(self, email, api_token, jira_url):
         self.auth = HTTPBasicAuth(email, api_token)
-        self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
         self.jira_url = jira_url
 
     def buscar_chamados(self, jql, fields):
@@ -14,28 +17,39 @@ class JiraAPI:
             "maxResults": 100,
             "fields": fields
         }
-        res = requests.get(f"{self.jira_url}/rest/api/3/search", headers=self.headers, auth=self.auth, params=params)
-        return res.json().get("issues", []) if res.status_code == 200 else []
+        res = requests.get(
+            f"{self.jira_url}/rest/api/3/search",
+            headers=self.headers,
+            auth=self.auth,
+            params=params
+        )
+        if res.status_code == 200:
+            return res.json().get("issues", [])
+        return []
 
     def agrupar_chamados(self, chamados):
         agrupado = defaultdict(list)
         for issue in chamados:
-            fields = issue["fields"]
-            loja = fields.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+            f = issue["fields"]
+            loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+            ativo = f.get("customfield_14825", {}).get("value", "--")
+            problema = f.get("customfield_12374", "--")
+            pdv = f.get("customfield_14829", "--")
 
             agrupado[loja].append({
                 "key": issue["key"],
-                "pdv": fields.get("customfield_14829", "--"),
-                "ativo": fields.get("customfield_14825", {}).get("value", "--"),
-                "problema": fields.get("customfield_12374", "--"),
-                "endereco": fields.get("customfield_12271", "--"),
-                "estado": fields.get("customfield_11948", {}).get("value", "--"),
-                "cep": fields.get("customfield_11993", "--"),
-                "cidade": fields.get("customfield_11994", "--"),
-                "data_agendada": fields.get("customfield_12036", "")
+                "pdv": pdv,
+                "ativo": ativo,
+                "problema": problema,
+                "endereco": f.get("customfield_12271", "--"),
+                "estado": f.get("customfield_11948", {}).get("value", "--"),
+                "cep": f.get("customfield_11993", "--"),
+                "cidade": f.get("customfield_11994", "--"),
+                "data_agendada": f.get("customfield_12036", "")
             })
         return agrupado
-            def get_transitions(self, issue_key):
+
+    def get_transitions(self, issue_key):
         """Retorna lista de transições disponíveis para um chamado."""
         res = requests.get(
             f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions",
@@ -55,4 +69,3 @@ class JiraAPI:
             json={"transition": {"id": str(transition_id)}}
         )
         return res.status_code == 204
-
