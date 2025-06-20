@@ -33,18 +33,19 @@ FIELDS = (
 )
 
 # ── Carrega chamados ──
-pendentes    = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-agrup_pend   = jira.agrupar_chamados(pendentes)
+pendentes  = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
+agrup_pend = jira.agrupar_chamados(pendentes)
 
-agendados    = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
+agendados     = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
 grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados:
-    f     = issue["fields"]
-    loja  = f.get("customfield_14954",{}).get("value","Loja Desconhecida")
-    raw   = f.get("customfield_12036")
-    date  = (
+    f    = issue["fields"]
+    loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    raw  = f.get("customfield_12036")
+    date = (
         datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
-        .strftime("%d/%m/%Y %H:%M") if raw else "Não definida"
+        .strftime("%d/%m/%Y %H:%M")
+        if raw else "Não definida"
     )
     grouped_sched[date][loja].append(issue)
 
@@ -53,13 +54,12 @@ with st.sidebar:
     st.header("Ações")
     if st.button("↩️ Desfazer última ação"):
         if st.session_state.history:
-            action = st.session_state.history.pop()
+            action  = st.session_state.history.pop()
             reverted = 0
             for key in action["keys"]:
-                trans = jira.get_transitions(key)
+                trans  = jira.get_transitions(key)
                 rev_id = next(
-                    (t["id"] for t in trans 
-                     if t.get("to",{}).get("name") == action["from"]),
+                    (t["id"] for t in trans if t.get("to",{}).get("name") == action["from"]),
                     None
                 )
                 if rev_id and jira.transicionar_status(key, rev_id):
@@ -71,11 +71,11 @@ with st.sidebar:
     st.markdown("---")
     st.header("Transição de Chamados")
 
-    # 1) Seleção de loja (só as que têm pendentes)
+    # 1) Seleção de loja (apenas as que têm pendentes)
     lojas_pend = sorted(agrup_pend.keys())
     loja_sel   = st.selectbox("Loja:", ["—"] + lojas_pend, key="trans_store")
 
-    # 2) Monta lista de FSAs pendentes + agendados para essa loja
+    # 2) Monta lista de FSAs pendentes + agendados
     fsas = []
     if loja_sel != "—":
         fsas += [ch["key"] for ch in agrup_pend.get(loja_sel, [])]
@@ -83,7 +83,7 @@ with st.sidebar:
             fsas += [ch["key"] for ch in issues.get(loja_sel, [])]
     fsas = sorted(set(fsas))
 
-    # 3) Multiselect de FSAs atualiza ao escolher a loja
+    # 3) Multiselect de FSAs (atualiza ao escolher loja)
     selected = st.multiselect(
         "FSAs (pend. + agend.):",
         options=fsas,
@@ -91,24 +91,26 @@ with st.sidebar:
         key="trans_fsas"
     )
 
-    # 4) Escolha de transição e campos obrigatórios
+    # 4) Selecione transição e preencha campos obrigatórios
     if selected:
         opts   = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
         choice = st.selectbox("Transição:", ["—"] + list(opts.keys()), key="trans_choice")
 
         extra_fields = {}
-        # qualquer transição que contenha "agend" no nome
+        # qualquer transição com "agend" no nome
         if choice and "agend" in choice.lower():
             st.markdown("**Preencha os campos obrigatórios**")
             data    = st.date_input("Data do Agendamento")
             hora    = st.time_input("Hora do Agendamento")
-            tecnico = st.text_input("Técnico responsável", "")
-            iso     = datetime.combine(data, hora).isoformat()
-            extra_fields["customfield_12036"] = iso
+            tecnico = st.text_input("Técnico responsável")
+            # formata no padrão ISO + Zulu (aceito pelo Jira)
+            dt_str = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            extra_fields["customfield_12036"] = dt_str
             if tecnico:
-                extra_fields["customfield_12279"] = tecnico
+                # dropdown custom field espera objeto { "value": "Texto" }
+                extra_fields["customfield_12279"] = {"value": tecnico}
 
-        # 5) Botão que efetivamente dispara a transição
+        # 5) Botão aplica a transição
         if st.button("Aplicar Transição"):
             prev = jira.get_issue(selected[0]) \
                        .get("fields", {}) \
@@ -124,7 +126,7 @@ with st.sidebar:
             st.session_state.history.append({"keys": selected, "from": prev})
 
     st.markdown("---")
-    # filtro de loja para AGENDADOS (visualização)
+    # filtro de loja para AGENDADOS
     lojas_sched = sorted({l for stores in grouped_sched.values() for l in stores})
     st.multiselect(
         "Filtrar loja (AGENDADOS):",
