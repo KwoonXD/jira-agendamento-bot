@@ -32,11 +32,11 @@ FIELDS = (
 pendentes_raw = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
 agrup_pend    = jira.agrupar_chamados(pendentes_raw)
 
-# ── Busca e agrupa agendados (normalizado) ──
-agendados_raw  = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
-agrup_sched    = jira.agrupar_chamados(agendados_raw)
+# ── Busca e agrupa agendados ──
+agendados_raw = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
+agrup_sched   = jira.agrupar_chamados(agendados_raw)
 
-# ── Raw grouping por loja para transições em massa ──
+# ── Raw por loja para transições em massa ──
 raw_by_loja = defaultdict(list)
 for issue in pendentes_raw + agendados_raw:
     loja = issue["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
@@ -73,31 +73,34 @@ with st.sidebar:
         em_campo = st.checkbox("Técnico está em campo? (agendar + mover tudo)")
 
         if em_campo:
-            # 3) Dados de agendamento necessários
+            # 3) Dados de agendamento
             st.markdown("**Preencha dados de agendamento**")
             data    = st.date_input("Data do Agendamento")
             hora    = st.time_input("Hora do Agendamento")
             tecnico = st.text_input("Dados dos Técnicos (Nome-CPF-RG-TEL)")
 
-            # monta payload de agendamento
-            dt_iso = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
+            # payload de agendamento
+            dt_iso  = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
             extra_ag = {"customfield_12036": dt_iso}
             if tecnico:
                 extra_ag["customfield_12279"] = {
                     "type": "doc", "version": 1,
-                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}]
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": tecnico}]
+                    }]
                 }
 
-            # 4) Botão único para agendar + mover
-            keys_pend    = [i["key"] for i in pendentes_raw    if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
-            keys_sched   = [i["key"] for i in agendados_raw   if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
-            all_keys     = keys_pend + keys_sched
+            # 4) Botão único: agendar pendentes + mover todos
+            keys_pend  = [i["key"] for i in pendentes_raw  if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            keys_sched = [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            all_keys   = keys_pend + keys_sched
 
             if st.button(f"Agendar e mover {len(all_keys)} chamados → Tec-Campo"):
                 errors = []
                 moved  = 0
 
-                # a) primeiro, agendar todos os pendentes
+                # a) agendar pendentes
                 for key in keys_pend:
                     trans = jira.get_transitions(key)
                     ag_id = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
@@ -108,10 +111,10 @@ with st.sidebar:
                     else:
                         errors.append(f"{key} sem transição agend")
 
-                # b) depois, mover TODOS para Tec-Campo
+                # b) mover todos para Tec-Campo
                 for key in all_keys:
                     trans = jira.get_transitions(key)
-                    tc_id = next((t["id"] for t in trans if "tec-campo" in t["to"]["name"].lower()), None)
+                    tc_id = next((t["id"] for t in trans if "tec-campo" in t.get("to",{}).get("name","").lower()), None)
                     if tc_id:
                         r = jira.transicionar_status(key, tc_id)
                         if r.status_code == 204:
@@ -130,13 +133,29 @@ with st.sidebar:
                     st.success(f"{len(all_keys)} FSAs agendados e movidos → Tec-Campo")
                     st.session_state.history.append({"keys": all_keys, "from": "AGENDADO"})
 
+                    # 5) Exibir mensagens para o técnico, destacando os novos
+                    moved_issues = raw_by_loja[loja_sel]
+                    detail       = jira.agrupar_chamados(moved_issues)[loja_sel]
+                    novos        = [d for d in detail if d["key"] in keys_pend]
+                    antigos      = [d for d in detail if d["key"] in keys_sched]
+
+                    st.markdown("### 🆕 Novos Agendados:")
+                    st.code(gerar_mensagem(loja_sel, novos), language="text")
+
+                    if antigos:
+                        st.markdown("### 📋 Já Agendados:")
+                        st.code(gerar_mensagem(loja_sel, antigos), language="text")
+
         else:
-            # Fluxo manual: escolher subset FSAs para agendar/transicionar
+            # Fluxo manual: subset de FSAs
             opts_p = [i["key"] for i in pendentes_raw  if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts_a = [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             selected = st.multiselect("Selecione FSAs pend.+agend.:", options=sorted(set(opts_p + opts_a)))
 
             extra = {}
+            choice = None
+            trans_opts = {}
+
             if selected:
                 trans_opts = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
                 choice     = st.selectbox("Transição:", ["—"] + list(trans_opts.keys()))
@@ -145,20 +164,17 @@ with st.sidebar:
                     d = st.date_input("Data do Agendamento")
                     h = st.time_input("Hora do Agendamento")
                     tec = st.text_input("Dados dos Técnicos (Nome-CPF-RG-TEL)")
-                    iso= datetime.combine(d, h).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
+                    iso = datetime.combine(d, h).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
                     extra["customfield_12036"] = iso
                     if tec:
                         extra["customfield_12279"] = {
                             "type": "doc", "version": 1,
                             "content":[{"type":"paragraph","content":[{"type":"text","text":tec}]}]
                         }
-            else:
-                choice = None
-                trans_opts = {}
 
             if st.button("Aplicar"):
                 if not selected or choice in (None, "—"):
-                    st.warning("Selecione FSAs e transição válida.")
+                    st.warning("Selecione FSAs e escolha transição.")
                 else:
                     prev = jira.get_issue(selected[0])["fields"]["status"]["name"]
                     errs = []
