@@ -1,170 +1,84 @@
-import streamlit as st
-from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
-from collections import defaultdict
+import requests
+from requests.auth import HTTPBasicAuth
 
-from utils.jira_api import JiraAPI
-from utils.messages import gerar_mensagem, verificar_duplicidade
+class JiraAPI:
+    def __init__(self, email: str, api_token: str, jira_url: str):
+        self.email = email
+        self.api_token = api_token
+        self.jira_url = jira_url.rstrip('/')
+        self.auth = HTTPBasicAuth(self.email, self.api_token)
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
 
-# ── Configuração da página e auto‐refresh a cada 90 s ──
-st.set_page_config(page_title="Painel Field Service", layout="wide")
-st_autorefresh(interval=90_000, key="auto_refresh")
+    def buscar_chamados(self, jql: str, fields: str) -> list:
+        """
+        Busca issues via JQL e retorna lista de issues.
+        """
+        params = {
+            "jql": jql,
+            "maxResults": 100,
+            "fields": fields
+        }
+        url = f"{self.jira_url}/rest/api/3/search"
+        res = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+        if res.status_code == 200:
+            return res.json().get("issues", [])
+        return []
 
-# ── Botão manual de refresh ──
-if st.button("🔄 Atualizar agora"):
-    st.experimental_rerun()
+    def agrupar_chamados(self, issues: list) -> dict:
+        """
+        Agrupa issues por customfield_14954 (loja) e retorna dict:
+        { loja_value: [ {key, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
+        """
+        from collections import defaultdict
+        agrup = defaultdict(list)
+        for issue in issues:
+            f = issue.get("fields", {})
+            loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+            agrup[loja].append({
+                "key": issue.get("key"),
+                "pdv": f.get("customfield_14829", "--"),
+                "ativo": f.get("customfield_14825", {}).get("value", "--"),
+                "problema": f.get("customfield_12374", "--"),
+                "endereco": f.get("customfield_12271", "--"),
+                "estado": f.get("customfield_11948", {}).get("value", "--"),
+                "cep": f.get("customfield_11993", "--"),
+                "cidade": f.get("customfield_11994", "--"),
+                "data_agendada": f.get("customfield_12036")
+            })
+        return agrup
 
-# ── Histórico de undo ──
-if "history" not in st.session_state:
-    st.session_state.history = []
+    def get_transitions(self, issue_key: str) -> list:
+        """
+        Retorna lista de transições disponíveis para a issue.
+        """
+        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
+        res = requests.get(url, headers=self.headers, auth=self.auth)
+        if res.status_code == 200:
+            return res.json().get("transitions", [])
+        return []
 
-# ── Instancia JiraAPI ──
-jira = JiraAPI(
-    st.secrets["EMAIL"],
-    st.secrets["API_TOKEN"],
-    "https://delfia.atlassian.net"
-)
+    def get_issue(self, issue_key: str) -> dict:
+        """
+        Retorna JSON completo da issue (ou pelo menos os campos necessários como status).
+        """
+        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}"
+        # busca só o campo status para history
+        res = requests.get(url, headers=self.headers, auth=self.auth, params={"fields": "status"})
+        if res.status_code == 200:
+            return res.json()
+        return {}
 
-# ── Campos para busca ──
-FIELDS = (
-    "summary,customfield_14954,customfield_14829,customfield_14825,"
-    "customfield_12374,customfield_12271,customfield_11993,"
-    "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
-)
-
-# ── Carrega chamados ──
-pendentes  = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-agrup_pend = jira.agrupar_chamados(pendentes)
-
-agendados     = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
-grouped_sched = defaultdict(lambda: defaultdict(list))
-for issue in agendados:
-    f    = issue["fields"]
-    loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    raw  = f.get("customfield_12036")
-    date = (
-        datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
-        .strftime("%d/%m/%Y %H:%M")
-        if raw else "Não definida"
-    )
-    grouped_sched[date][loja].append(issue)
-
-# ── Sidebar ──
-with st.sidebar:
-    st.header("Ações")
-    if st.button("↩️ Desfazer última ação"):
-        if st.session_state.history:
-            action  = st.session_state.history.pop()
-            reverted = 0
-            for key in action["keys"]:
-                trans  = jira.get_transitions(key)
-                rev_id = next(
-                    (t["id"] for t in trans
-                     if t.get("to",{}).get("name") == action["from"]),
-                    None
-                )
-                if rev_id and jira.transicionar_status(key, rev_id):
-                    reverted += 1
-            st.success(f"Revertido: {reverted} FSAs → {action['from']}")
-        else:
-            st.info("Nenhuma ação para desfazer.")
-
-    st.markdown("---")
-    st.header("Transição de Chamados")
-
-    # 1) Seleção de loja (só as que têm pendentes)
-    lojas_pend = sorted(agrup_pend.keys())
-    loja_sel   = st.selectbox("Loja:", ["—"] + lojas_pend, key="trans_store")
-
-    # 2) Monta lista de FSAs pendentes + agendados
-    fsas = []
-    if loja_sel != "—":
-        fsas += [ch["key"] for ch in agrup_pend.get(loja_sel, [])]
-        for issues in grouped_sched.values():
-            fsas += [ch["key"] for ch in issues.get(loja_sel, [])]
-    fsas = sorted(set(fsas))
-
-    # 3) Multiselect de FSAs (atualiza ao escolher loja)
-    selected = st.multiselect(
-        "FSAs (pend. + agend.):",
-        options=fsas,
-        default=fsas,
-        key="trans_fsas"
-    )
-
-    # 4) Escolha de transição e campos obrigatórios
-    extra_fields = {}
-    if selected:
-        opts   = {t["name"]: t["id"] for t in jira.get_transitions(selected[0])}
-        choice = st.selectbox("Transição:", ["—"] + list(opts.keys()), key="trans_choice")
-
-        if choice and "agend" in choice.lower():
-            st.markdown("**Preencha os campos obrigatórios**")
-            data    = st.date_input("Data do Agendamento")
-            hora    = st.time_input("Hora do Agendamento")
-            tecnico = st.text_input("Técnico responsável")
-            # monta string no formato 2025-06-19T19:00:00.000-0300
-            dt_str = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
-            extra_fields["customfield_12036"] = dt_str
-            if tecnico:
-                extra_fields["customfield_12279"] = {"value": tecnico}
-
-    # 5) Botão que aplica a transição e mostra erros
-    if st.button("Aplicar Transição"):
-        prev = jira.get_issue(selected[0]) \
-                   .get("fields", {}) \
-                   .get("status", {}) \
-                   .get("name", "")
-        erros = []
-        for key in selected:
-            res = jira.transicionar_status(key, opts[choice], fields=extra_fields or None)
-            if res.status_code != 204:
-                erros.append(f"{key}: {res.status_code} – {res.text}")
-        if erros:
-            st.error("Falhas ao transicionar:")
-            for e in erros:
-                st.code(e)
-        else:
-            st.success(f"{len(selected)} FSAs movidos → {choice}")
-            st.session_state.history.append({"keys": selected, "from": prev})
-
-    st.markdown("---")
-    # filtro de loja para AGENDADOS (visualização)
-    lojas_sched = sorted({l for stores in grouped_sched.values() for l in stores})
-    st.multiselect(
-        "Filtrar loja (AGENDADOS):",
-        options=["Todas"] + lojas_sched,
-        default=["Todas"],
-        key="filter_sched"
-    )
-
-# ── Main ──
-st.title("📱 Painel Field Service")
-col1, col2 = st.columns(2)
-
-with col1:
-    st.header("⏳ Chamados PENDENTES de Agendamento")
-    if not pendentes:
-        st.warning("Nenhum chamado em AGENDAMENTO.")
-    else:
-        for loja, issues in agrup_pend.items():
-            with st.expander(f"{loja} — {len(issues)} chamados", expanded=False):
-                st.code(gerar_mensagem(loja, issues), language="text")
-
-with col2:
-    st.header("📋 Chamados AGENDADOS")
-    sel_sched = st.session_state.get("filter_sched", ["Todas"])
-    for date, stores in grouped_sched.items():
-        total = sum(len(v) for v in stores.values())
-        if total == 0:
-            continue
-        st.subheader(f"{date} — {total} chamados")
-        for loja, issues in stores.items():
-            if "Todas" not in sel_sched and loja not in sel_sched:
-                continue
-            with st.expander(f"{loja} — {len(issues)} chamados", expanded=False):
-                detalhe = jira.agrupar_chamados(issues)[loja]
-                st.code(gerar_mensagem(loja, detalhe), language="text")
-
-st.markdown("---")
-st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+    def transicionar_status(self, issue_key: str, transition_id: str, fields: dict = None) -> requests.Response:
+        """
+        Executa transição de status. Se campos forem fornecidos, inclui no payload.
+        Retorna o objeto Response para inspeção de status/erro.
+        """
+        payload = {"transition": {"id": str(transition_id)}}
+        if fields:
+            payload["fields"] = fields
+        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
+        res = requests.post(url, headers=self.headers, auth=self.auth, json=payload)
+        return res
