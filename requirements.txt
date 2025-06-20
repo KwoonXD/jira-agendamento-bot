@@ -1,6 +1,5 @@
 streamlit
 streamlit-autorefresh
-streamlit-fullcalendar>=0.0.4
 requests
 pytz
 plotly
