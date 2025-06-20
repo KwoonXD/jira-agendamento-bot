@@ -6,7 +6,7 @@ from collections import defaultdict
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# --- Configuração inicial ---
+# --- Configurações iniciais ---
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=60_000, key="auto_refresh")
 
@@ -22,10 +22,10 @@ FIELDS = (
 )
 
 st.title("📱 Painel Field Service")
-col_agendamento, col_agendado = st.columns(2)
+col_pend, col_age = st.columns(2)
 
-# --- Coluna 1: Chamados PENDENTES (AGENDAMENTO) ---
-with col_agendamento:
+# ——— Pending (AGENDAMENTO) ———
+with col_pend:
     st.header("⏳ Chamados AGENDAMENTO")
     pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
     agrup_pend = jira.agrupar_chamados(pendentes)
@@ -34,90 +34,78 @@ with col_agendamento:
         st.warning("Nenhum chamado pendente de AGENDAMENTO.")
     else:
         for loja, issues in agrup_pend.items():
-            with st.expander(f"{loja} — {len(issues)} chamado(s)", expanded=False):
-                # Mensagem padrão
+            with st.expander(f"{loja} — {len(issues)} chamados", expanded=False):
                 st.code(gerar_mensagem(loja, issues), language="text")
-                st.markdown("**▶️ Transicionar chamados**")
-                for ch in issues:
-                    key = ch["key"]
-                    st.markdown(f"- **{key}**  | PDV {ch['pdv']} | Ativo {ch['ativo']}")
-                    trans = jira.get_transitions(key)
-                    opts = {t["name"]: t["id"] for t in trans}
-                    escolha = st.selectbox(f"Para onde mover {key}?", ["—"] + list(opts.keys()), key=f"sel_pend_{key}")
-                    if escolha != "—":
-                        if st.button(f"Aplicar {key}", key=f"btn_pend_{key}"):
-                            ok = jira.transicionar_status(key, opts[escolha])
-                            if ok:
-                                st.success(f"{key} → {escolha}")
-                            else:
-                                st.error(f"Falha ao mover {key}")
-                st.markdown("---")
 
-# --- Coluna 2: Chamados AGENDADOS ---
-with col_agendado:
+                # bulk select + transition
+                keys = [i["key"] for i in issues]
+                sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=f"pend_sel_{loja}")
+                if sel:
+                    tr = jira.get_transitions(keys[0])
+                    opts = {t["name"]: t["id"] for t in tr}
+                    choice = st.selectbox("Transição:", ["—"] + list(opts), key=f"pend_tr_{loja}")
+                    if choice != "—" and st.button("Aplicar em todos", key=f"pend_btn_{loja}"):
+                        for k in sel:
+                            jira.transicionar_status(k, opts[choice])
+                        st.success(f"{len(sel)} FSAs movidos → {choice}")
+
+# ——— Scheduled (AGENDADOS) ———
+with col_age:
     st.header("📋 Chamados AGENDADOS")
     agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
 
-    # agrupar por data e loja
-    agrup = defaultdict(lambda: defaultdict(list))
-    for issue in agendados:
-        f = issue["fields"]
-        loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-        raw = f.get("customfield_12036")
-        data = (
-            datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
-            .strftime("%d/%m/%Y") if raw else "Não definida"
-        )
-        agrup[data][loja].append(issue)
-
     # filtro de loja
-    lojas = sorted({i["fields"].get("customfield_14954",{}).get("value","") for i in agendados})
-    sel_lojas = st.sidebar.multiselect("🔍 Filtrar por loja:", ["Todas"] + lojas, default=["Todas"])
+    lojas = sorted({iss["fields"].get("customfield_14954",{}).get("value","") for iss in agendados})
+    sel_lojas = st.sidebar.multiselect("Filtrar loja:", ["Todas"] + lojas, default=["Todas"])
 
-    for data, por_loja in agrup.items():
-        vis = {l: lst for l, lst in por_loja.items() if "Todas" in sel_lojas or l in sel_lojas}
-        total = sum(len(lst) for lst in vis.values())
+    # agrupar por data e loja
+    grouped = defaultdict(lambda: defaultdict(list))
+    for iss in agendados:
+        f = iss["fields"]
+        loja = f.get("customfield_14954",{}).get("value","Loja Desconhecida")
+        raw = f.get("customfield_12036")
+        date = (datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
+                .strftime("%d/%m/%Y")) if raw else "Não definida"
+        grouped[date][loja].append(iss)
+
+    for date, by_store in grouped.items():
+        total = sum(len(lst) for lst in by_store.values())
         if total == 0:
             continue
+        st.subheader(f"{date} — {total} chamados")
 
-        st.subheader(f"📅 {data} — {total} chamado(s)")
-        for loja, issues in vis.items():
+        for loja, issues in by_store.items():
+            if "Todas" not in sel_lojas and loja not in sel_lojas:
+                continue
+
             detalhes = jira.agrupar_chamados(issues)[loja]
-            duplicados = verificar_duplicidade(detalhes)
-            fsas_dup = [c["key"] for c in detalhes if (c["pdv"], c["ativo"]) in duplicados]
-            spare = jira.buscar_chamados(
-                f'project = FSA AND status = "Aguardando Spare" '
-                f'AND "Codigo da Loja[Dropdown]" = {loja}', FIELDS
+            dup = verificar_duplicidade(detalhes)
+            fsas_dup   = [c["key"] for c in detalhes if (c["pdv"], c["ativo"]) in dup]
+            spare_iss  = jira.buscar_chamados(
+                f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}',
+                FIELDS
             )
-            fsas_spare = [c["key"] for c in spare]
+            fsas_spare = [c["key"] for c in spare_iss]
 
-            # montar tag de alerta
-            alerta = []
-            if fsas_dup:
-                alerta.append(f"🔴 Dup: {', '.join(fsas_dup)}")
-            if fsas_spare:
-                alerta.append(f"⚠️ Spare: {', '.join(fsas_spare)}")
-            tag = f"  [{'  •  '.join(alerta)}]" if alerta else ""
+            alerts = []
+            if fsas_dup:    alerts.append(f"Dup: {', '.join(fsas_dup)}")
+            if fsas_spare:  alerts.append(f"Spare: {', '.join(fsas_spare)}")
+            tag = f" [{' • '.join(alerts)}]" if alerts else ""
 
-            with st.expander(f"{loja} — {len(issues)} chamado(s){tag}", expanded=False):
-                # mensagem detalhada
+            with st.expander(f"{loja} — {len(issues)} chamados{tag}", expanded=False):
                 st.code(gerar_mensagem(loja, detalhes), language="text")
-                st.markdown("**▶️ Transicionar chamados**")
-                for ch in detalhes:
-                    key = ch["key"]
-                    st.markdown(f"- **{key}**  | PDV {ch['pdv']} | Ativo {ch['ativo']}")
-                    trans = jira.get_transitions(key)
-                    opts = {t["name"]: t["id"] for t in trans}
-                    escolha = st.selectbox(f"Para onde mover {key}?", ["—"] + list(opts.keys()), key=f"sel_age_{key}")
-                    if escolha != "—":
-                        if st.button(f"Aplicar {key}", key=f"btn_age_{key}"):
-                            ok = jira.transicionar_status(key, opts[escolha])
-                            if ok:
-                                st.success(f"{key} → {escolha}")
-                            else:
-                                st.error(f"Falha ao mover {key}")
-                st.markdown("---")
 
-# --- Rodapé ---
+                # bulk select + transition
+                keys = [c["key"] for c in detalhes]
+                sel = st.multiselect("Selecionar FSAs:", keys, default=keys, key=f"age_sel_{date}_{loja}")
+                if sel:
+                    tr = jira.get_transitions(keys[0])
+                    opts = {t["name"]: t["id"] for t in tr}
+                    choice = st.selectbox("Transição:", ["—"] + list(opts), key=f"age_tr_{date}_{loja}")
+                    if choice != "—" and st.button("Aplicar em todos", key=f"age_btn_{date}_{loja}"):
+                        for k in sel:
+                            jira.transicionar_status(k, opts[choice])
+                        st.success(f"{len(sel)} FSAs movidos → {choice}")
+
 st.markdown("---")
-st.caption(f"🕒 Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
