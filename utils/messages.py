@@ -20,3 +20,13 @@ def gerar_mensagem(loja, chamados):
         f"*Cidade:* {chamados[0]['cidade']}"
     )
     return "\n".join(blocos)
+
+def verificar_duplicidade(chamados):
+    seen = set()
+    duplicados = set()
+    for ch in chamados:
+        identificador = (ch['ativo'], ch['problema'])
+        if identificador in seen:
+            duplicados.add(identificador)
+        seen.add(identificador)
+    return duplicados
