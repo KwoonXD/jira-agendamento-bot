@@ -24,24 +24,28 @@ if not st.session_state.authenticated:
             st.error("Credenciais inválidas")
     st.stop()
 
-# ── CONFIGURAÇÃO DA PÁGINA & AUTO-REFRESH ─────────────────────────────────────
+# ── CONFIG DA PÁGINA & AUTO-REFRESH ──────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
-st_autorefresh(interval=90_000, key="auto_refresh")  # 1m30s
+st_autorefresh(interval=90_000, key="auto_refresh")
 
 # ── INSTÂNCIA JIRA ─────────────────────────────────────────────────────────────
 jira = JiraAPI(st.secrets["EMAIL"], st.secrets["API_TOKEN"], "https://delfia.atlassian.net")
 
-# ── SIDEBAR: LOGOUT, VISÃO, REFRESH, UNDO, TRANSIÇÕES ─────────────────────────
+# ── SIDEBAR: VISÃO, REFRESH, LOGOUT, UNDO, TRANSIÇÕES ──────────────────────────
 with st.sidebar:
-    if st.button("🔓 Sair"):
+    st.header("🔄 Atualização")
+    if st.button("Atualizar agora"):
+        pass  # o auto-refresh faz o recarregamento
+
+    st.markdown("---")
+    st.header("🔒 Conta")
+    if st.button("Sair"):
         st.session_state.authenticated = False
         st.experimental_rerun()
 
+    st.markdown("---")
     st.markdown("## 📊 Visão")
     view = st.radio("", ["Lista", "Calendário"])
-
-    if st.button("🔄 Atualizar"):
-        pass  # auto-refresh já cuida
 
     st.markdown("---")
     st.header("↩️ Desfazer última ação")
@@ -53,10 +57,11 @@ with st.sidebar:
                 jira.transicionar_status(key, None, fields=prev)
             st.success("Última ação desfeita")
         else:
-            st.info("Nada a desfazer")
+            st.info("Nada para desfazer")
 
     st.markdown("---")
-    st.header("▶️ Transição de Chamados")
+    st.header("▶️ Transição em Massa")
+    # pega só campos mínimos
     F_SIMPLE = "summary,customfield_14954,customfield_12036,customfield_12279"
     pend = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", F_SIMPLE)
     age  = jira.buscar_chamados('project = FSA AND status = AGENDADO',    F_SIMPLE)
@@ -83,8 +88,8 @@ with st.sidebar:
                 extra["customfield_12036"] = iso
                 if te:
                     extra["customfield_12279"] = {
-                      "type":"doc","version":1,
-                      "content":[{"type":"paragraph","content":[{"type":"text","text":te}]}]
+                        "type":"doc","version":1,
+                        "content":[{"type":"paragraph","content":[{"type":"text","text":te}]}]
                     }
             if st.button("Aplicar"):
                 prevs = []
@@ -94,9 +99,9 @@ with st.sidebar:
                     jira.transicionar_status(k, opts[choice], fields=extra or None)
                 st.session_state.history = st.session_state.get("history",[])
                 st.session_state.history.append({"keys":sel,"prev_fields":prevs})
-                st.success(f"{len(sel)} FSAs movidos → {choice}")
+                st.success(f"{len(sel)} FSAs → {choice}")
 
-# ── BUSCA COMPLETA DE CHAMADOS ─────────────────────────────────────────────────
+# ── BUSCA E AGRUPA CHAMADOS ────────────────────────────────────────────────────
 FIELDS_FULL = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
@@ -106,8 +111,7 @@ pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELD
 agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO',    FIELDS_FULL)
 
 agrup_pend = jira.agrupar_chamados(pendentes)
-
-grouped   = defaultdict(lambda: defaultdict(list))
+grouped    = defaultdict(lambda: defaultdict(list))
 for i in agendados:
     f    = i["fields"]
     loja = f.get("customfield_14954",{}).get("value","Loja")
@@ -128,9 +132,15 @@ for i in agendados:
     stores.append(loja)
 
 df_cal = pd.DataFrame(cal_rows)
+
+# ── PALETA MANUAL ───────────────────────────────────────────────────────────────
+PALETTE = [
+    "#1f77b4","#ff7f0e","#2ca02c","#d62728",
+    "#9467bd","#8c564b","#e377c2","#7f7f7f",
+    "#bcbd22","#17becf"
+]
 unique_lojas = sorted(set(stores))
-palette = px.colors.qualitative.Plotly
-color_map = {l: palette[i%len(palette)] for i,l in enumerate(unique_lojas)}
+color_map    = {l: PALETTE[i % len(PALETTE)] for i,l in enumerate(unique_lojas)}
 
 # ── RENDERIZAÇÃO PRINCIPAL ─────────────────────────────────────────────────────
 st.title("📱 Painel Field Service")
@@ -138,7 +148,7 @@ st.title("📱 Painel Field Service")
 if view == "Lista":
     col1, col2 = st.columns(2)
 
-    # PENDENTES
+    # Pendentes
     with col1:
         st.header("⏳ Pendentes de Agendamento")
         if not pendentes:
@@ -148,7 +158,7 @@ if view == "Lista":
                 with st.expander(f"{loja} — {len(lst)} FSAs"):
                     st.code(gerar_mensagem(loja, lst), language="text")
 
-    # AGENDADOS
+    # Agendados
     with col2:
         st.header("📋 Chamados AGENDADOS")
         if not agendados:
@@ -190,7 +200,7 @@ elif view == "Calendário":
         df_mes = df_cal[df_cal["data"].apply(lambda d:d.year==sel_ano and d.month==sel_mes)]
         cal = calendar.Calendar(firstweekday=6)
 
-        # Gera tabela HTML com contagem e barras
+        # monta HTML
         html = "<table style='border-collapse:collapse;width:100%'>"
         html += "<tr>" + "".join(
             f"<th style='border:1px solid #444;padding:4px;"
@@ -207,7 +217,7 @@ elif view == "Calendário":
                 else:
                     data_atual = datetime(sel_ano,sel_mes,day).date()
                     subset = df_mes[df_mes["data"]==data_atual]
-                    cnt = len(subset)
+                    cnt    = len(subset)
 
                     color = "#28a745" if cnt>0 else "#444"
                     badge = (
@@ -236,7 +246,7 @@ elif view == "Calendário":
         st.markdown(html, unsafe_allow_html=True)
 
         dias = sorted(df_mes["data"].unique())
-        sel = st.selectbox("Ver detalhes do dia:", [d.strftime("%d/%m/%Y") for d in dias])
+        sel  = st.selectbox("Ver detalhes do dia:", [d.strftime("%d/%m/%Y") for d in dias])
         if sel:
             dt_sel = datetime.strptime(sel,"%d/%m/%Y").date()
             issues_sel = [
