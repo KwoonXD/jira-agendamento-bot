@@ -2,6 +2,8 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 from collections import defaultdict
+import pandas as pd
+import calendar
 
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
@@ -24,18 +26,25 @@ if not st.session_state.authenticated:
 
 # ── CONFIG E AUTO-REFRESH ──────────────────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
-st_autorefresh(interval=90_000, key="auto_refresh")  # 1m30s
+st_autorefresh(interval=90_000, key="auto_refresh")
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # LOGOUT
     if st.button("🔓 Sair"):
         st.session_state.authenticated = False
         st.experimental_rerun()
 
+    # VISÃO
+    st.markdown("## 📊 Visão")
+    view = st.radio("", ["Lista", "Calendário"])
+
+    # REFRESH manual
     if st.button("🔄 Atualizar"):
-        pass
+        pass  # o st_autorefresh cuida
 
     st.markdown("---")
+    # UNDO
     st.header("↩️ Desfazer última ação")
     if st.button("Desfazer"):
         history = st.session_state.get("history", [])
@@ -49,11 +58,12 @@ with st.sidebar:
             st.info("Nada a desfazer")
 
     st.markdown("---")
+    # TRANSIÇÃO
     st.header("▶️ Transição de Chamados")
     jira = JiraAPI(st.secrets["EMAIL"], st.secrets["API_TOKEN"], "https://delfia.atlassian.net")
-    F = "summary,customfield_14954,customfield_12036"
-    pend = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", F)
-    age  = jira.buscar_chamados('project = FSA AND status = AGENDADO', F)
+    F_SIMPLE = "summary,customfield_14954,customfield_12036"
+    pend = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", F_SIMPLE)
+    age  = jira.buscar_chamados('project = FSA AND status = AGENDADO', F_SIMPLE)
 
     by_store = defaultdict(list)
     for i in pend + age:
@@ -83,7 +93,7 @@ with st.sidebar:
             if st.button("Aplicar"):
                 prevs = []
                 for k in sel:
-                    old = jira.buscar_chamados(f'issue = {k}', F)[0]["fields"]
+                    old = jira.buscar_chamados(f'issue = {k}', F_SIMPLE)[0]["fields"]
                     prevs.append(old)
                     jira.transicionar_status(k, opts[choice], fields=extra or None)
                 st.session_state.history = st.session_state.get("history",[])
@@ -107,48 +117,132 @@ for i in agendados:
     f    = i["fields"]
     loja = f.get("customfield_14954",{}).get("value","Loja")
     raw  = f.get("customfield_12036","")
-    date = (datetime.strptime(raw,"%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
-            if raw else "Não definida")
+    date = (datetime.strptime(raw,"%Y-%m-%dT%H:%M:%S.%f%z")
+            .strftime("%d/%m/%Y") if raw else "Não definida")
     grouped[date][loja].append(i)
 
-# ── LAYOUT: DUAS COLUNAS ───────────────────────────────────────────────────────
+# DataFrame para calendário
+cal_rows = []
+for i in agendados:
+    raw = i["fields"].get("customfield_12036")
+    if not raw: continue
+    dt   = datetime.strptime(raw,"%Y-%m-%dT%H:%M:%S.%f%z")
+    loja = i["fields"].get("customfield_14954",{}).get("value","Loja")
+    cal_rows.append({"data":dt.date(),"key":i["key"],"loja":loja})
+df_cal = pd.DataFrame(cal_rows)
+
+# ── RENDERIZAÇÃO: Lista ou Calendário ─────────────────────────────────────────
 st.title("📱 Painel Field Service")
-col1, col2 = st.columns(2)
+if view == "Lista":
+    col1, col2 = st.columns(2)
 
-# Coluna 1: PENDENTES
-with col1:
-    st.header("⏳ Chamados PENDENTES de Agendamento")
-    if not pendentes:
-        st.warning("Nenhum pendente.")
+    # Coluna 1: pendentes
+    with col1:
+        st.header("⏳ Pendentes de Agendamento")
+        if not pendentes:
+            st.warning("Nenhum pendente.")
+        else:
+            for loja,lst in agrup_pend.items():
+                with st.expander(f"{loja} — {len(lst)} FSAs"):
+                    st.code(gerar_mensagem(loja,lst), language="text")
+
+    # Coluna 2: agendados
+    with col2:
+        st.header("📋 Chamados AGENDADOS")
+        if not agendados:
+            st.info("Nenhum agendado.")
+        else:
+            for date, stores in sorted(grouped.items()):
+                total = sum(len(v) for v in stores.values())
+                st.subheader(f"{date} — {total} FSAs")
+                for loja,lst in stores.items():
+                    det = jira.agrupar_chamados(lst)[loja]
+                    dup = [d["key"] for d in det
+                           if (d["pdv"],d["ativo"]) in verificar_duplicidade(det)]
+                    spare = jira.buscar_chamados(
+                        f'project = FSA AND status = "Aguardando Spare" '
+                        f'AND "Codigo da Loja[Dropdown]" = {loja}',
+                        FIELDS_FULL
+                    )
+                    spk = [x["key"] for x in spare]
+                    tags=[]
+                    if spk: tags.append("Spare: "+", ".join(spk))
+                    if dup: tags.append("Dup: "+", ".join(dup))
+                    tag_str = f" [{' • '.join(tags)}]" if tags else ""
+                    with st.expander(f"{loja} — {len(lst)} FSAs{tag_str}"):
+                        st.markdown("**FSAs:** " + ", ".join(d["key"] for d in det))
+                        st.code(gerar_mensagem(loja,det), language="text")
+
+elif view == "Calendário":
+    st.header("📆 Calendário Mensal de Agendamentos")
+    if df_cal.empty:
+        st.info("Nenhum agendamento definido.")
     else:
-        for loja, lst in agrup_pend.items():
-            with st.expander(f"{loja} — {len(lst)} FSAs"):
-                st.code(gerar_mensagem(loja, lst), language="text")
+        hoje  = datetime.now()
+        anos  = sorted({d.year for d in df_cal["data"]})
+        meses = list(range(1,13))
+        sel_ano = st.selectbox("Ano:", anos, index=anos.index(hoje.year))
+        sel_mes = st.selectbox("Mês:", meses, index=hoje.month-1)
+        st.markdown(f"### {calendar.month_name[sel_mes]} {sel_ano}")
 
-# Coluna 2: AGENDADOS
-with col2:
-    st.header("📋 Chamados AGENDADOS")
-    if not agendados:
-        st.info("Nenhum agendado.")
-    else:
-        for date, stores in sorted(grouped.items()):
-            total = sum(len(v) for v in stores.values())
-            st.subheader(f"{date} — {total} FSAs")
-            for loja, lst in stores.items():
-                det = jira.agrupar_chamados(lst)[loja]
-                dup = [d["key"] for d in det if (d["pdv"],d["ativo"]) in verificar_duplicidade(det)]
-                spare = jira.buscar_chamados(
-                    f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}',
-                    FIELDS_FULL
-                )
-                spk = [x["key"] for x in spare]
-                tags=[]
-                if spk: tags.append("Spare: "+", ".join(spk))
-                if dup: tags.append("Dup: "+", ".join(dup))
-                tag_str = f" [{' • '.join(tags)}]" if tags else ""
-                with st.expander(f"{loja} — {len(lst)} FSAs{tag_str}"):
-                    st.markdown("**FSAs:** " + ", ".join(d["key"] for d in det))
-                    st.code(gerar_mensagem(loja, det), language="text")
+        df_mes = df_cal[df_cal["data"].apply(lambda d:d.year==sel_ano and d.month==sel_mes)]
+        cal = calendar.Calendar(firstweekday=6)
+        html="<table style='border-collapse:collapse;width:100%'>"
+        html+="<tr>"+ "".join(
+            f"<th style='border:1px solid #444;padding:4px;"
+            f"background:#333;color:#fff'>{d}</th>"
+            for d in ["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"]
+        )+"</tr>"
+        for week in cal.monthdayscalendar(sel_ano,sel_mes):
+            html+="<tr>"
+            for day in week:
+                if day==0:
+                    html+="<td style='border:1px solid #444;"
+                    html+="padding:12px;background:#222'></td>"
+                else:
+                    dt = datetime(sel_ano,sel_mes,day).date()
+                    sub= df_mes[df_mes["data"]==dt]
+                    cnt= len(sub)
+                    badge = (
+                        f"<div title='FSAs: {', '.join(sub['key'])}' "
+                        f"style='background:{'#28a745' if cnt else '#444'};"
+                        "color:#fff;padding:4px;border-radius:4px;"
+                        "text-align:center'>{cnt} FSAs</div>"
+                    )
+                    bars="".join(
+                        "<span style='display:inline-block;width:8px;"
+                        "height:8px;margin:1px;background:#888;"
+                        "border-radius:2px' "
+                        f"title='{r['key']} ({r['loja']})'></span>"
+                        for _,r in sub.iterrows()
+                    )
+                    html+=(
+                        f"<td style='border:1px solid #444;padding:8px;"
+                        "vertical-align:top'>"
+                        f"<div style='font-size:14px;color:#ccc'>{day}</div>"
+                        f"{badge}<div style='margin-top:4px'>{bars}</div></td>"
+                    )
+            html+="</tr>"
+        html+="</table>"
+        st.markdown(html, unsafe_allow_html=True)
 
+        # Detalhes do dia
+        dias = sorted(df_mes["data"].unique())
+        sel = st.selectbox("Ver detalhes do dia:", [d.strftime("%d/%m/%Y") for d in dias])
+        if sel:
+            dt_sel = datetime.strptime(sel,"%d/%m/%Y").date()
+            sel_iss = [
+                i for i in agendados
+                if i["fields"].get("customfield_12036") and
+                   datetime.strptime(i["fields"]["customfield_12036"],
+                    "%Y-%m-%dT%H:%M:%S.%f%z").date()==dt_sel
+            ]
+            st.markdown(f"#### Chamados em {sel}")
+            dets = jira.agrupar_chamados(sel_iss)
+            for loja,lst in dets.items():
+                with st.expander(f"{loja} — {len(lst)} FSAs"):
+                    st.code(gerar_mensagem(loja,lst),language="text")
+
+# ── RODAPÉ ────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
