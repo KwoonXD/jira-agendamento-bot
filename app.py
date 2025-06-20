@@ -6,7 +6,7 @@ from collections import defaultdict
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# ── Configuração da página e auto-refresh ──
+# ── Configuração da página e auto‐refresh ──
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")  # 1m30s
 
@@ -18,7 +18,7 @@ if st.button("🔄 Atualizar agora"):
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ── Inicializa JiraAPI ──
+# ── Instancia JiraAPI ──
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
@@ -49,39 +49,30 @@ if st.sidebar.button("↩️ Desfazer última ação"):
     else:
         st.sidebar.info("Nenhuma ação para desfazer.")
 
-# ── Sidebar: filtro por loja para AGENDADOS ──
-all_agendados = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
-lojas = sorted({
-    issue["fields"]
-         .get("customfield_14954", {})
-         .get("value", "")
-    for issue in all_agendados
-})
-sel_lojas = st.sidebar.multiselect("Filtrar loja:", ["Todas"] + lojas, default=["Todas"])
-
-# ── Título e layout ──
+# ── Cabeçalho e layout ──
 st.title("📱 Painel Field Service")
-col_pend, col_age = st.columns(2)
+col_pending, col_scheduled = st.columns(2)
 
-# ── Coluna 1: AGENDAMENTO ──
-with col_pend:
-    st.header("⏳ AGENDAMENTO")
-    pendentes = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-    agrup_pend = jira.agrupar_chamados(pendentes)
+# ── Coluna 1: Pendentes de Agendamento ──
+with col_pending:
+    st.header("⏳ Chamados PENDENTES de Agendamento")
+    pending_issues = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
+    grouped_pending = jira.agrupar_chamados(pending_issues)
 
-    if not pendentes:
-        st.warning("Nenhum pendente.")
+    if not pending_issues:
+        st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
-        for loja, issues in agrup_pend.items():
-            label = f"{loja} — {len(issues)} chamados"
-            with st.expander(label, expanded=False):
+        for loja, issues in grouped_pending.items():
+            with st.expander(f"{loja} — {len(issues)} chamados", expanded=False):
                 st.code(gerar_mensagem(loja, issues), language="text")
 
-# ── Coluna 2: AGENDADOS ──
-with col_age:
-    st.header("📋 AGENDADOS")
-    grouped = defaultdict(lambda: defaultdict(list))
-    for issue in all_agendados:
+# ── Coluna 2: Agendados ──
+with col_scheduled:
+    st.header("📋 Chamados AGENDADOS")
+    scheduled_issues = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
+    grouped_scheduled = defaultdict(lambda: defaultdict(list))
+
+    for issue in scheduled_issues:
         f = issue["fields"]
         loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
         raw = f.get("customfield_12036")
@@ -89,64 +80,38 @@ with col_age:
             datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
             if raw else "Não definida"
         )
-        grouped[date][loja].append(issue)
+        grouped_scheduled[date][loja].append(issue)
 
-    for date, by_store in grouped.items():
-        total = sum(len(v) for v in by_store.values())
+    for date, stores in grouped_scheduled.items():
+        total = sum(len(iss) for iss in stores.values())
         if total == 0:
             continue
         st.subheader(f"{date} — {total} chamados")
+        for loja, issues in stores.items():
+            with st.expander(f"{loja} — {len(issues)} chamados", expanded=False):
+                st.code(gerar_mensagem(loja, jira.agrupar_chamados(issues)[loja]), language="text")
 
-        for loja, issues in by_store.items():
-            if "Todas" not in sel_lojas and loja not in sel_lojas:
-                continue
-
-            detalhes = jira.agrupar_chamados(issues)[loja]
-            dup = verificar_duplicidade(detalhes)
-            fsas_dup = [c["key"] for c in detalhes if (c["pdv"], c["ativo"]) in dup]
-            spare = jira.buscar_chamados(
-                f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}',
-                FIELDS
-            )
-            fsas_spare = [c["key"] for c in spare]
-            alerts = []
-            if fsas_dup:
-                alerts.append(f"Dup: {', '.join(fsas_dup)}")
-            if fsas_spare:
-                alerts.append(f"Spare: {', '.join(fsas_spare)}")
-            tag = f" [{' • '.join(alerts)}]" if alerts else ""
-
-            label = f"{loja} — {len(issues)} chamados{tag}"
-            with st.expander(label, expanded=False):
-                st.code(gerar_mensagem(loja, detalhes), language="text")
-
-# ── Painel de Transição Global ──
-st.header("▶️ Transição de Chamados")
-# FSAs pendentes
-visible = [issue["key"] for issue in pendentes]
-# FSAs agendados (já filtrados)
-visible += [
-    issue["key"]
-    for issue in all_agendados
-    if ("Todas" in sel_lojas or
-        issue["fields"]
-             .get("customfield_14954", {})
-             .get("value", "") in sel_lojas)
-]
-
-if visible:
-    selected = st.multiselect("Selecionar FSAs para transição:", sorted(set(visible)))
-    if selected:
-        trans = jira.get_transitions(selected[0])
-        opts = {t["name"]: t["id"] for t in trans}
-        choice = st.selectbox("Transição:", ["—"] + list(opts.keys()))
-        if choice != "—" and st.button("Aplicar Transição"):
-            prev = jira.get_issue(selected[0]).get("fields", {}).get("status", {}).get("name", "")
-            for key in selected:
-                jira.transicionar_status(key, opts[choice])
-            st.session_state.history.append({"keys": selected, "from": prev})
-            st.success(f"{len(selected)} FSAs movidos → {choice}")
-
-# ── Rodapé ──
+# ── Painel de Transição (pendentes apenas) ──
 st.markdown("---")
-st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+st.header("▶️ Transição de Chamados em Agendamento")
+
+# lojas com pendentes
+lojas_pend = sorted(grouped_pending.keys())
+if not lojas_pend:
+    st.info("Não há lojas com chamados em AGENDAMENTO.")
+else:
+    loja_sel = st.selectbox("Selecione a loja:", ["—"] + lojas_pend)
+    if loja_sel != "—":
+        issues = grouped_pending[loja_sel]
+        fsas = [ch["key"] for ch in issues]
+        selected = st.multiselect(
+            "FSAs em Agendamento:",
+            options=fsas,
+            default=fsas,
+            key="fsas_to_transition"
+        )
+
+        if selected:
+            trans = jira.get_transitions(selected[0])
+            opts = {t["name"]: t["id"] for t in trans}
+            choice = st
