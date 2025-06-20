@@ -69,3 +69,9 @@ class JiraAPI:
             json={"transition": {"id": str(transition_id)}}
         )
         return res.status_code == 204
+
+def get_issue(self, key):
+    res = requests.get(f"{self.jira_url}/rest/api/3/issue/{key}",
+                       headers=self.headers, auth=self.auth,
+                       params={"fields": "status"})
+    return res.json() if res.status_code == 200 else {}
