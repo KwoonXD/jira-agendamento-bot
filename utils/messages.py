@@ -12,14 +12,7 @@ def gerar_mensagem(loja, chamados):
             f"*Problema:* {ch.get('problema','--')}"
         ]
         # Data Agendada: somente se existir
-        data_agendada = ch.get('data_agendada') or ""
-        if data_agendada:
-            try:
-                df = datetime.strptime(data_agendada, "%Y-%m-%dT%H:%M:%S.%f%z") \
-                             .strftime('%d/%m/%Y %H:%M')
-            except:
-                df = data_agendada
-            linhas.append(f"*Data Agendada:* {df}")
+     
 
         # Separador e demais campos
         linhas.append("*****")
