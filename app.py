@@ -6,19 +6,33 @@ import pandas as pd
 import calendar
 
 # ── AUTENTICAÇÃO SIMPLES ──────────────────────────────────────────────────────
+# ── AUTENTICAÇÃO SIMPLES ──────────────────────────────────────────────────────
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
     st.title("🔒 Login Necessário")
+
     user = st.text_input("Usuário")
     pwd  = st.text_input("Senha", type="password")
+
     if st.button("Entrar"):
-        if user == "admwt" and pwd == "suporte#wt2025":
+        # limpa espaços em branco
+        u = user.strip()
+        p = pwd.strip()
+
+        # DEBUG (temporário): mostra no console do Streamlit
+        st.write(f"DEBUG: você digitou -> Usuário='{u}', Senha='{p}'")
+
+        # checa exato
+        if u == "admwt" and p == "suporte#wt2025":
             st.session_state.authenticated = True
+            st.experimental_rerun()
         else:
             st.error("Usuário ou senha incorretos")
+
     st.stop()
+
 
 # ── SIDEBAR: LOGOUT / REFRESH / UNDO / TRANSIÇÃO ──────────────────────────────
 with st.sidebar:
