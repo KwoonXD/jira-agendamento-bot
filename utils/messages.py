@@ -3,7 +3,6 @@ from datetime import datetime
 def gerar_mensagem(loja, chamados):
     blocos = []
     for ch in chamados:
-        # Cabeçalho fixo
         linhas = [
             f"*{ch['key']}*",
             f"*Loja:* {loja}",
@@ -11,11 +10,21 @@ def gerar_mensagem(loja, chamados):
             f"*ATIVO:* {ch.get('ativo','--')}",
             f"*Problema:* {ch.get('problema','--')}"
         ]
-        # Data Agendada: somente se existir
-     
 
-        # Separador e demais campos
+        # --- Data Agendada (se houver) ---
+        raw = ch.get("data_agendada")
+        if raw:
+            try:
+                dt = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
+                linhas.append(f"*Data Agendada:* {dt.strftime('%d/%m/%Y %H:%M')}")
+            except Exception:
+                # em caso de formato inesperado, mostra o raw
+                linhas.append(f"*Data Agendada:* {raw}")
+
+        # separador
         linhas.append("*****")
+
+        # demais campos
         linhas.extend([
             f"*Endereço:* {ch.get('endereco','--')}",
             f"*Estado:* {ch.get('estado','--')}",
@@ -25,6 +34,7 @@ def gerar_mensagem(loja, chamados):
 
         blocos.append("\n".join(linhas))
 
+    # separa cada bloco de chamado por linha em branco dupla
     return "\n\n".join(blocos)
 
 
