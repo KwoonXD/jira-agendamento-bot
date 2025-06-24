@@ -2,63 +2,40 @@ from datetime import datetime
 
 def gerar_mensagem(loja, chamados):
     blocos = []
-    seen_enderecos = set()  # para não repetir o mesmo endereço
+    # Para coletar o endereço único (assumindo todos pendentes são do mesmo local)
+    endereco_info = None
 
     for ch in chamados:
+        # cabeçalho de cada FSA
         linhas = [
-            f"*{ch['key']}*",
-            f"*Loja:* {loja}",
-            f"*PDV:* {ch.get('pdv','--')}",
-            f"*ATIVO:* {ch.get('ativo','--')}",
-            f"*Problema:* {ch.get('problema','--')}"
+            f"{ch['key']}",
+            f"Loja: {loja}",
+            f"PDV: {ch.get('pdv','--')}",
+            f"ATIVO: {ch.get('ativo','--')}",
+            f"Problema: {ch.get('problema','--')}",
+            f"Data Agendada: --",  # sempre “--” para pendentes
+            "***"
         ]
+        blocos.append("\n".join(linhas))
 
-        # Data Agendada (se existir)
-        raw = ch.get("data_agendada")
-        if raw:
-            try:
-                dt = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
-                linhas.append(f"*Data Agendada:* {dt.strftime('%d/%m/%Y %H:%M')}")
-            except Exception:
-                linhas.append(f"*Data Agendada:* {raw}")
-
-        linhas.append("*****")
-
-        # monta uma tupla única que representa o endereço completo
-        endereco_key = (
+        # armazena o único endereço (o último sobrescreve, mas todos são iguais)
+        endereco_info = (
             ch.get('endereco','--'),
             ch.get('estado','--'),
             ch.get('cep','--'),
             ch.get('cidade','--')
         )
 
-        # só exibe o bloco de endereço se ainda não exibimos para essa tupla
-        if endereco_key not in seen_enderecos:
-            seen_enderecos.add(endereco_key)
-            linhas.extend([
-                f"*Endereço:* {endereco_key[0]}",
-                f"*Estado:* {endereco_key[1]}",
-                f"*CEP:* {endereco_key[2]}",
-                f"*Cidade:* {endereco_key[3]}"
+    # no final, adiciona uma linha em branco e o bloco de endereço único
+    if endereco_info:
+        blocos.append(
+            "\n".join([
+                f"Endereço: {endereco_info[0]}",
+                f"Estado: {endereco_info[1]}",
+                f"CEP: {endereco_info[2]}",
+                f"Cidade: {endereco_info[3]}"
             ])
+        )
 
-        blocos.append("\n".join(linhas))
-
-    # separa cada chamado por dupla nova linha
+    # junta tudo com duas quebras de linha entre blocos
     return "\n\n".join(blocos)
-
-
-def verificar_duplicidade(chamados):
-    """
-    Retorna um set de tuplas (pdv, ativo) que aparecem mais de uma vez,
-    para sinalizar duplicidade.
-    """
-    seen = {}
-    duplicates = set()
-    for ch in chamados:
-        key = (ch.get("pdv"), ch.get("ativo"))
-        if key in seen:
-            duplicates.add(key)
-        else:
-            seen[key] = True
-    return duplicates
