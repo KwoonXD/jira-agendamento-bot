@@ -19,7 +19,6 @@ def gerar_mensagem(loja, chamados):
             f"PDV: {ch.get('pdv','--')}",
             f"ATIVO: {ch.get('ativo','--')}",
             f"Problema: {ch.get('problema','--')}",
-            f"Data Agendada: --",  # sempre “--” para pendentes
             "***"
         ]
         blocos.append("\n".join(linhas))
