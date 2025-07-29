@@ -14,10 +14,10 @@ def gerar_mensagem(loja, chamados):
     for ch in chamados:
         # cabeçalho de cada FSA
         linhas = [
-            f"{ch['key']}",
+            f"*{ch['key']}*",
             f"Loja: {loja}",
             f"PDV: {ch.get('pdv','--')}",
-            f"ATIVO: {ch.get('ativo','--')}",
+            f"*ATIVO: {ch.get('ativo','--')}*",
             f"Problema: {ch.get('problema','--')}",
             "***"
         ]
