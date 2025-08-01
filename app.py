@@ -25,7 +25,7 @@ jira = JiraAPI(
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
-    "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
+    "customfield_11994,customfield_11948,customfield_12036,customfield_12279,status"
 )
 
 # ── 1) Carrega PENDENTES e agrupa por loja ──
@@ -36,7 +36,7 @@ agrup_pend    = jira.agrupar_chamados(pendentes_raw)
 agendados_raw = jira.buscar_chamados('project = FSA AND status in (AGENDADO, TEC-CAMPO)', FIELDS)
 grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
-    f    = issue["fields"]
+    f    = issue.get("fields", {})
     loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw  = f.get("customfield_12036")
     data_str = (
@@ -81,7 +81,12 @@ with col2:
                     FIELDS
                 )
                 spare_keys=[i["key"] for i in spare_raw]
-                tec_campo_keys = [i["key"] for i in iss if i["fields"]["status"]["name"].upper() == "TEC-CAMPO"]
+                tec_campo_keys = []
+                for i in iss:
+                    status_obj = i.get("fields", {}).get("status", {})
+                    status_name = status_obj.get("name", "").upper()
+                    if status_name == "TEC-CAMPO":
+                        tec_campo_keys.append(i["key"])
                 tags=[]
                 if spare_keys: tags.append("Spare: "+", ".join(spare_keys))
                 if dup_keys:   tags.append("Dup: "+", ".join(dup_keys))
