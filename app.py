@@ -32,23 +32,39 @@ FIELDS = (
 pendentes_raw = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
 agrup_pend    = jira.agrupar_chamados(pendentes_raw)
 
-# ── 2) Carrega AGENDADOS e TEC-CAMPO e agrupa por data → loja → lista de issues ──
-agendados_raw = jira.buscar_chamados('project = FSA AND status in (AGENDADO, TEC-CAMPO)', FIELDS)
-grouped_sched = defaultdict(lambda: defaultdict(list))
+# ── 2) Carrega AGENDADOS e TEC-CAMPO separadamente ──
+agendados_raw = jira.buscar_chamados('project = FSA AND status = AGENDADO', FIELDS)
+tec_campo_raw = jira.buscar_chamados('project = FSA AND status = TEC-CAMPO', FIELDS)
+
+# Agrupa AGENDADOS por data → loja → lista de issues
+grouped_agendados = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
-    f    = issue.get("fields", {})
+    f = issue.get("fields", {})
     loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    raw  = f.get("customfield_12036")
+    raw = f.get("customfield_12036")
     data_str = (
         datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
                 .strftime("%d/%m/%Y")
         if raw else "Não definida"
     )
-    grouped_sched[data_str][loja].append(issue)
+    grouped_agendados[data_str][loja].append(issue)
 
-# ── 3) Raw por loja (pendentes+agendados) para transições em massa ──
+# Agrupa TEC-CAMPO por data → loja → lista de issues
+grouped_tec_campo = defaultdict(lambda: defaultdict(list))
+for issue in tec_campo_raw:
+    f = issue.get("fields", {})
+    loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    raw = f.get("customfield_12036")
+    data_str = (
+        datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
+                .strftime("%d/%m/%Y")
+        if raw else "Não definida"
+    )
+    grouped_tec_campo[data_str][loja].append(issue)
+
+# ── 3) Raw por loja (pendentes+agendados+tec_campo) para transições em massa ──
 raw_by_loja = defaultdict(list)
-for i in pendentes_raw + agendados_raw:
+for i in pendentes_raw + agendados_raw + tec_campo_raw:
     loja = i["fields"].get("customfield_14954",{}).get("value","Loja Desconhecida")
     raw_by_loja[loja].append(i)
 
@@ -66,11 +82,11 @@ with col1:
                 st.code(gerar_mensagem(loja,iss),language="text")
 
 with col2:
-    st.header("📋 Chamados AGENDADOS + TEC-CAMPO")
+    st.header("📋 Chamados AGENDADOS")
     if not agendados_raw:
-        st.info("Nenhum chamado em AGENDADO ou TEC-CAMPO.")
+        st.info("Nenhum chamado em AGENDADO.")
     else:
-        for date, stores in sorted(grouped_sched.items()):
+        for date, stores in sorted(grouped_agendados.items()):
             total=sum(len(v) for v in stores.values())
             st.subheader(f"{date} — {total} chamado(s)")
             for loja,iss in sorted(stores.items()):
@@ -81,20 +97,26 @@ with col2:
                     FIELDS
                 )
                 spare_keys=[i["key"] for i in spare_raw]
-                tec_campo_keys = []
-                for i in iss:
-                    status_obj = i.get("fields", {}).get("status", {})
-                    status_name = status_obj.get("name", "").upper()
-                    if status_name == "TEC-CAMPO":
-                        tec_campo_keys.append(i["key"])
                 tags=[]
                 if spare_keys: tags.append("Spare: "+", ".join(spare_keys))
                 if dup_keys:   tags.append("Dup: "+", ".join(dup_keys))
-                if tec_campo_keys: tags.append("Tec-Campo: "+", ".join(tec_campo_keys))
                 tag_str=f" [{' • '.join(tags)}]" if tags else ""
                 with st.expander(f"{loja} — {len(iss)} chamado(s){tag_str}",expanded=False):
                     st.markdown("*FSAs:* "+", ".join(d["key"] for d in detalhes))
                     st.code(gerar_mensagem(loja,detalhes),language="text")
+
+st.markdown("---")
+st.header("🚧 Chamados TEC-CAMPO")
+if not tec_campo_raw:
+    st.info("Nenhum chamado em TEC-CAMPO.")
+else:
+    for date, stores in sorted(grouped_tec_campo.items()):
+        total=sum(len(v) for v in stores.values())
+        st.subheader(f"{date} — {total} chamado(s)")
+        for loja,iss in sorted(stores.items()):
+            detalhes=jira.agrupar_chamados(iss)[loja]
+            st.markdown(f"*FSAs:* {', '.join(d['key'] for d in detalhes)}")
+            st.code(gerar_mensagem(loja,detalhes),language="text")
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
