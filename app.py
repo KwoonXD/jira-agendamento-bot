@@ -53,11 +53,11 @@ for i in pendentes_raw + agendados_raw:
     raw_by_loja[loja].append(i)
 
 # ── Main ──
-st.title("\ud83d\udcf1 Painel Field Service")
+st.title("📱 Painel Field Service")
 col1,col2=st.columns(2)
 
 with col1:
-    st.header("\u23f3 Chamados PENDENTES de Agendamento")
+    st.header("⏳ Chamados PENDENTES de Agendamento")
     if not pendentes_raw:
         st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
@@ -66,7 +66,7 @@ with col1:
                 st.code(gerar_mensagem(loja,iss),language="text")
 
 with col2:
-    st.header("\ud83d\udccb Chamados AGENDADOS + TEC-CAMPO")
+    st.header("📋 Chamados AGENDADOS + TEC-CAMPO")
     if not agendados_raw:
         st.info("Nenhum chamado em AGENDADO ou TEC-CAMPO.")
     else:
