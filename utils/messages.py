@@ -4,34 +4,51 @@ from datetime import datetime
 
 def gerar_mensagem(loja, chamados):
     """
-    Gera uma mensagem para um grupo de chamados da mesma loja,
-    listando cada FSA sem data agendada e, ao final, exibindo
-    uma única vez o bloco de endereço.
+    Gera uma mensagem para um grupo de chamados da mesma loja.
+    Exibe detalhes de cada FSA, o endereço da loja uma única vez,
+    e inclui links obrigatórios no final dependendo das regras de ativo/pdv.
     """
     blocos = []
-    endereco_info = None  # Será preenchido com a tupla (end,estado,cep,cidade)
+    endereco_info = None
+    incluir_iso_desktop = False
+    incluir_iso_pdv = False
 
     for ch in chamados:
-        # cabeçalho de cada FSA
+        ativo = ch.get('ativo', '--')
+        pdv_raw = ch.get('pdv', '--')
+
+        # Lógica para inclusão de links
+        if isinstance(pdv_raw, int):
+            pdv = pdv_raw
+        else:
+            try:
+                pdv = int(str(pdv_raw).strip())
+            except:
+                pdv = None
+
+        if 'desktop' in str(ativo).lower() or (pdv == 300):
+            incluir_iso_desktop = True
+        if pdv and pdv > 300:
+            incluir_iso_pdv = True
+
+        # Bloco do chamado
         linhas = [
             f"*{ch['key']}*",
             f"Loja: {loja}",
-            f"PDV: {ch.get('pdv','--')}",
-            f"*ATIVO: {ch.get('ativo','--')}*",
-            f"Problema: {ch.get('problema','--')}",
+            f"PDV: {pdv_raw}",
+            f"*ATIVO: {ativo}*",
+            f"Problema: {ch.get('problema', '--')}",
             "***"
         ]
         blocos.append("\n".join(linhas))
 
-        # armazena endereço (último sobrescreve, mas todos pendentes têm o mesmo)
         endereco_info = (
-            ch.get('endereco','--'),
-            ch.get('estado','--'),
-            ch.get('cep','--'),
-            ch.get('cidade','--')
+            ch.get('endereco', '--'),
+            ch.get('estado', '--'),
+            ch.get('cep', '--'),
+            ch.get('cidade', '--')
         )
 
-    # após listar todos, adiciona o bloco de endereço apenas uma vez
     if endereco_info:
         blocos.append(
             "\n".join([
@@ -42,7 +59,16 @@ def gerar_mensagem(loja, chamados):
             ])
         )
 
-    # une todos os blocos com linha em branco dupla
+    # 🔽 Instruções obrigatórias
+    instrucoes = ["---", "⚠️ **É OBRIGATÓRIO LEVAR:**"]
+    if incluir_iso_desktop:
+        instrucoes.append("- 📀 [ISO do Desktop](https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link)")
+    if incluir_iso_pdv:
+        instrucoes.append("- 📀 [ISO do PDV](https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link)")
+    instrucoes.append("- 📝 [RAT Atualizada](https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing)")
+
+    blocos.append("\n".join(instrucoes))
+
     return "\n\n".join(blocos)
 
 
@@ -60,3 +86,4 @@ def verificar_duplicidade(chamados):
         else:
             seen[key] = True
     return duplicates
+
