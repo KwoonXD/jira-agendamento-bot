@@ -1,78 +1,100 @@
 # utils/messages.py
 from datetime import datetime
 
-def _is_desktop(ch: dict) -> bool:
-    """Desktop se PDV == 300 ou se 'desktop' aparecer em ATIVO (case-insensitive)."""
+# --- Helpers ---------------------------------------------------------------
+
+def _classificar_tipo(ch: dict) -> str:
+    """
+    "Desktop" se PDV == 300 ou se 'desktop' aparecer no campo ATIVO (case-insensitive).
+    Caso contrário, "PDV".
+    """
     pdv = str(ch.get("pdv", "")).strip()
     ativo = str(ch.get("ativo", "")).lower()
-    return pdv == "300" or "desktop" in ativo
+    if pdv == "300" or "desktop" in ativo:
+        return "Desktop"
+    return "PDV"
 
-def gerar_mensagem(
+
+# --- Mensagem para WhatsApp ------------------------------------------------
+
+def gerar_mensagem_whatsapp(
     loja: str,
     chamados: list[dict],
     iso_desktop_url: str | None = None,
     iso_pdv_url: str | None = None,
-    rat_url: str | None = None,  # mantido no args caso precise futuramente
-    *,
-    whatsapp_style: bool = True
+    rat_url: str | None = None,
 ) -> str:
     """
-    Gera texto por LOJA no formato de WhatsApp (igual ao print enviado):
-      - 1 bloco por FSA (sem data), com *** separando cada um
-      - Ao final: Endereço + linha de traço + bloco 'É OBRIGATÓRIO LEVAR'
-      - ISO do PDV sempre que houver PDV; ISO do Desktop só se houver Desktop
+    Gera a mensagem no formato que você vem usando:
+    - Um bloco por FSA (sem data agendada).
+    - Um único bloco de endereço ao final.
+    - Depois do endereço, a seção "⚠️ É OBRIGATÓRIO LEVAR" com links:
+        • ISO do Desktop (se houver ao menos 1 Desktop)
+        • ISO do PDV     (se houver ao menos 1 PDV)
+        • RAT            (sempre que informado)
     """
-    linhas: list[str] = []
-    tem_pdv, tem_desktop = False, False
+
+    if not chamados:
+        return "—"
+
+    linhas_total: list[str] = []
+    endereco_info = None
+    tem_desktop = False
+    tem_pdv = False
 
     for ch in chamados:
-        if _is_desktop(ch):
+        tipo = _classificar_tipo(ch)
+        if tipo == "Desktop":
             tem_desktop = True
         else:
             tem_pdv = True
 
-        linhas.extend([
+        # bloco do chamado (sem data)
+        linhas_total.extend([
             f"{ch.get('key','--')}",
-            f"Loja: {loja}",
-            f"PDV: {ch.get('pdv','--')}",
-            f"ATIVO: {ch.get('ativo','--')}",
-            f"Problema:{' ' + ch.get('problema','--')}",
-            "***",
-            "",
+            f"Loja {loja}",
+            f"PDV:{ch.get('pdv','--')}",
+            f"ATIVO:{str(ch.get('ativo','--')).replace(' ', '')}",
+            f"Problema:{ch.get('problema','--')}",
+            "***"
         ])
 
-    # bloco de endereço uma única vez
-    if chamados:
-        last = chamados[-1]
-        endereco = last.get('endereco', '--')
-        estado   = last.get('estado', '--')
-        cep      = last.get('cep', '--')
-        cidade   = last.get('cidade', '--')
+        # guardamos o endereço (exibimos 1x ao final)
+        endereco_info = (
+            ch.get('endereco','--'),
+            ch.get('estado','--'),
+            ch.get('cep','--'),
+            ch.get('cidade','--'),
+        )
 
-        linhas.extend([
-            f"Endereço: {endereco}",
-            f"Estado: {estado}",
-            f"CEP: {cep}",
-            f"Cidade: {cidade}",
+    # bloco único de endereço
+    if endereco_info:
+        linhas_total.extend([
             "",
-            "--------",
+            f"Endereço: {endereco_info[0]}",
+            f"Estado: {endereco_info[1]}",
+            f"CEP: {endereco_info[2]}",
+            f"Cidade: {endereco_info[3]}",
             "",
-            "⚠️ *É OBRIGATÓRIO LEVAR:*",
+            "---------",
+            "⚠️ *É OBRIGATÓRIO LEVAR:*"
         ])
-
-        # ISO(s) – só mostra os que fazem sentido para a loja
-        if tem_pdv and iso_pdv_url:
-            linhas.append(f"• 🖇️ ISO do PDV({iso_pdv_url})")
         if tem_desktop and iso_desktop_url:
-            linhas.append(f"• 🖇️ ISO do Desktop({iso_desktop_url})")
+            linhas_total.append(f"• 🔧 ISO do Desktop({iso_desktop_url})")
+        if tem_pdv and iso_pdv_url:
+            linhas_total.append(f"• 🔧 ISO do PDV({iso_pdv_url})")
+        if rat_url:
+            linhas_total.append(f"• 📄 RAT({rat_url})")
 
-    # remove possíveis linhas em branco finais duplicadas
-    while linhas and not linhas[-1]:
-        linhas.pop()
+    return "\n".join(linhas_total)
 
-    return "\n".join(linhas)
 
-def verificar_duplicidade(chamados):
+# --- Duplicidade -----------------------------------------------------------
+
+def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
+    """
+    Retorna um set de tuplas (pdv, ativo) que aparecem mais de uma vez.
+    """
     seen = {}
     duplicates = set()
     for ch in chamados:
