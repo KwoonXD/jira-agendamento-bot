@@ -251,7 +251,8 @@ with tab4:
         st.error("Instale: streamlit-sortables==0.3.1")
     else:
         def items_from(agrup):
-            return [f\"{d['key']} | {loja}\" for loja,dets in agrup.items() for d in dets]
+           return [f"{d['key']} | {loja}" for loja, dets in agrup.items() for d in dets]
+
 
         col1_items, col2_items, col3_items = items_from(pend), items_from(agnd), items_from(tec)
         cols = st.columns(3)
