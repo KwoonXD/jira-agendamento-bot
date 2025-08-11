@@ -1,4 +1,3 @@
-# streamlit_app.py
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
@@ -8,12 +7,12 @@ from itertools import chain
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# ── Links (pode trocar se quiser) ─────────────────────────────────────────────
+# ── Links (troque se quiser) ─────────────────────────────────────────────────
 ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
 ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
 RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
-# ── Setup ────────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
 if "history" not in st.session_state:
@@ -48,11 +47,12 @@ jira = JiraAPI(
     "https://delfia.atlassian.net",
 )
 
-# Status com aspas (TEC-CAMPO tem hífen)
+# JQLs (status com aspas)
 PEND_JQL = 'project = FSA AND status = "AGENDAMENTO"'
 AGEN_JQL = 'project = FSA AND status = "AGENDADO"'
 TEC_JQL  = 'project = FSA AND status = "TEC-CAMPO"'
 
+# Campos (inclui status)
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
@@ -77,16 +77,16 @@ for issue in tec_campo_raw:
     loja = f.get("customfield_14954", {}).get("value") or "Loja Desconhecida"
     grouped_tec_campo[parse_dt(f.get("customfield_12036"))][loja].append(issue)
 
-# Pendentes já vêm prontos p/ exibição via utils.messages
+# Pendentes já convertidos para o formato das mensagens
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
-# Para transições em massa (por loja)
+# Para transições por loja
 raw_by_loja = defaultdict(list)
 for i in chain(pendentes_raw, agendados_raw, tec_campo_raw):
     loja = i["fields"].get("customfield_14954", {}).get("value") or "Loja Desconhecida"
     raw_by_loja[loja].append(i)
 
-# ── Sidebar: ações e transições ──────────────────────────────────────────────
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Ações")
     if st.button("↩️ Desfazer última ação"):
@@ -171,7 +171,7 @@ with st.sidebar:
                         st.warning(f"Sem técnico: {', '.join(sem_tecnico)} (apenas agendados)")
 
         else:
-            # Transição manual (pendentes + agendados + tec-campo)
+            # Transição manual
             opts = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts += [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts += [i["key"] for i in tec_campo_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
@@ -224,10 +224,7 @@ with tab1:
             qtd_pdv, qtd_desktop = _contar_tipos(iss)
             titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
             with st.expander(titulo, expanded=False):
-                st.code(
-                    gerar_mensagem(loja, iss, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL),
-                    language="text"
-                )
+                st.markdown(gerar_mensagem(loja, iss, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL))
 
 with tab2:
     st.header(f"Chamados AGENDADOS ({len(agendados_raw)})")
@@ -240,16 +237,12 @@ with tab2:
             for loja, iss in sorted(stores.items()):
                 detalhes = jira.agrupar_chamados(iss)[loja]
                 qtd_pdv, qtd_desktop = _contar_tipos(detalhes)
-                # dup opcional
                 dup_keys = [d["key"] for d in detalhes if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
                 tag_str = f" [Dup: {', '.join(dup_keys)}]" if dup_keys else ""
                 titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop){tag_str}"
                 with st.expander(titulo, expanded=False):
                     st.markdown("*FSAs:* " + ", ".join(d["key"] for d in detalhes))
-                    st.code(
-                        gerar_mensagem(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL),
-                        language="text"
-                    )
+                    st.markdown(gerar_mensagem(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL))
 
 with tab3:
     st.header(f"Chamados TEC-CAMPO ({len(tec_campo_raw)})")
@@ -265,10 +258,7 @@ with tab3:
                 titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
                 with st.expander(titulo, expanded=False):
                     st.markdown(f"*FSAs:* {', '.join(d['key'] for d in detalhes)}")
-                    st.code(
-                        gerar_mensagem(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL),
-                        language="text"
-                    )
+                    st.markdown(gerar_mensagem(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL))
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
