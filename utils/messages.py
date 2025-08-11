@@ -1,71 +1,76 @@
+# utils/messages.py
 from datetime import datetime
 
-def _classificar_tipo(ch):
+def _is_desktop(ch: dict) -> bool:
     """Desktop se PDV == 300 ou se 'desktop' aparecer em ATIVO (case-insensitive)."""
     pdv = str(ch.get("pdv", "")).strip()
     ativo = str(ch.get("ativo", "")).lower()
-    if pdv == "300" or "desktop" in ativo:
-        return "Desktop"
-    return "PDV"
+    return pdv == "300" or "desktop" in ativo
 
-def gerar_mensagem(loja, chamados, iso_desktop_url=None, iso_pdv_url=None, rat_url=None):
+def gerar_mensagem(
+    loja: str,
+    chamados: list[dict],
+    iso_desktop_url: str | None = None,
+    iso_pdv_url: str | None = None,
+    rat_url: str | None = None,  # mantido no args caso precise futuramente
+    *,
+    whatsapp_style: bool = True
+) -> str:
     """
-    Mensagem por loja em MARKDOWN:
-      - Não mostra 'Data agendada'
-      - RAT: aparece UMA VEZ no final do bloco
-      - ISO(s): abaixo do endereço, apenas os tipos presentes na loja
+    Gera texto por LOJA no formato de WhatsApp (igual ao print enviado):
+      - 1 bloco por FSA (sem data), com *** separando cada um
+      - Ao final: Endereço + linha de traço + bloco 'É OBRIGATÓRIO LEVAR'
+      - ISO do PDV sempre que houver PDV; ISO do Desktop só se houver Desktop
     """
-    blocos = []
-    endereco_info = None
-    tem_desktop = False
-    tem_pdv = False
+    linhas: list[str] = []
+    tem_pdv, tem_desktop = False, False
 
     for ch in chamados:
-        tipo = _classificar_tipo(ch)
-        if tipo == "Desktop":
+        if _is_desktop(ch):
             tem_desktop = True
         else:
             tem_pdv = True
 
-        linhas = [
-            f"**{ch.get('key','--')}**",
+        linhas.extend([
+            f"{ch.get('key','--')}",
             f"Loja: {loja}",
-            f"Status: {ch.get('status','--')}",
             f"PDV: {ch.get('pdv','--')}",
-            f"**ATIVO: {ch.get('ativo','--')}**",
-            f"Tipo de atendimento: {tipo}",
-            f"Problema: {ch.get('problema','--')}",
+            f"ATIVO: {ch.get('ativo','--')}",
+            f"Problema:{' ' + ch.get('problema','--')}",
             "***",
-        ]
-        blocos.append("\n".join(linhas))
+            "",
+        ])
 
-        endereco_info = (
-            ch.get('endereco','--'),
-            ch.get('estado','--'),
-            ch.get('cep','--'),
-            ch.get('cidade','--')
-        )
+    # bloco de endereço uma única vez
+    if chamados:
+        last = chamados[-1]
+        endereco = last.get('endereco', '--')
+        estado   = last.get('estado', '--')
+        cep      = last.get('cep', '--')
+        cidade   = last.get('cidade', '--')
 
-    if endereco_info:
-        endereco_bloco = [
-            f"Endereço: {endereco_info[0]}",
-            f"Estado: {endereco_info[1]}",
-            f"CEP: {endereco_info[2]}",
-            f"Cidade: {endereco_info[3]}",
-        ]
-        # ISO(s) após o endereço
-        if tem_desktop and iso_desktop_url:
-            endereco_bloco.append(f"[ISO (Desktop)]({iso_desktop_url})")
+        linhas.extend([
+            f"Endereço: {endereco}",
+            f"Estado: {estado}",
+            f"CEP: {cep}",
+            f"Cidade: {cidade}",
+            "",
+            "--------",
+            "",
+            "⚠️ *É OBRIGATÓRIO LEVAR:*",
+        ])
+
+        # ISO(s) – só mostra os que fazem sentido para a loja
         if tem_pdv and iso_pdv_url:
-            endereco_bloco.append(f"[ISO (PDV)]({iso_pdv_url})")
+            linhas.append(f"• 🖇️ ISO do PDV({iso_pdv_url})")
+        if tem_desktop and iso_desktop_url:
+            linhas.append(f"• 🖇️ ISO do Desktop({iso_desktop_url})")
 
-        # RAT por último
-        if rat_url:
-            endereco_bloco.append(f"[📄 RAT]({rat_url})")
+    # remove possíveis linhas em branco finais duplicadas
+    while linhas and not linhas[-1]:
+        linhas.pop()
 
-        blocos.append("\n".join(endereco_bloco))
-
-    return "\n\n".join(blocos)
+    return "\n".join(linhas)
 
 def verificar_duplicidade(chamados):
     seen = {}
