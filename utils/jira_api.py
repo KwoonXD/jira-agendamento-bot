@@ -2,7 +2,6 @@ import requests
 from requests.auth import HTTPBasicAuth
 from collections import defaultdict
 
-
 class JiraAPI:
     def __init__(self, email: str, api_token: str, jira_url: str):
         self.email = email
@@ -15,11 +14,7 @@ class JiraAPI:
         }
 
     def buscar_chamados(self, jql: str, fields: str) -> list:
-        params = {
-            "jql": jql,
-            "maxResults": 100,
-            "fields": fields
-        }
+        params = {"jql": jql, "maxResults": 100, "fields": fields}
         url = f"{self.jira_url}/rest/api/3/search"
         res = requests.get(url, headers=self.headers, auth=self.auth, params=params)
         if res.status_code == 200:
@@ -27,10 +22,6 @@ class JiraAPI:
         return []
 
     def agrupar_chamados(self, issues: list) -> dict:
-        """
-        Agrupa issues por customfield_14954 (loja) e retorna:
-        { loja_value: [ {key, status, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
-        """
         agrup = defaultdict(list)
         for issue in issues:
             f = issue.get("fields", {})
@@ -56,13 +47,12 @@ class JiraAPI:
             return res.json().get("transitions", [])
         return []
 
-    def transition_by_name(self, issue_key: str, transition_name: str, fields: dict = None) -> bool:
+    def transition_by_name(self, issue_key: str, transition_name: str, fields: dict = None):
         transitions = self.get_transitions(issue_key)
         for t in transitions:
             if t.get("name", "").lower() == transition_name.lower():
-                self.transicionar_status(issue_key, t["id"], fields)
-                return True
-        return False
+                return self.transicionar_status(issue_key, t["id"], fields)
+        return None
 
     def get_issue(self, issue_key: str, fields: str = "status") -> dict:
         url = f"{self.jira_url}/rest/api/3/issue/{issue_key}"
@@ -79,11 +69,8 @@ class JiraAPI:
         res = requests.post(url, headers=self.headers, auth=self.auth, json=payload)
         return res
 
-    def add_comment(self, issue_key: str, body: str) -> bool:
-        """
-        Adiciona um comentário a um chamado no Jira.
-        """
+    def add_comment(self, issue_key: str, body: str):
         url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/comment"
         payload = {"body": body}
         res = requests.post(url, headers=self.headers, auth=self.auth, json=payload)
-        return res.status_code == 201
+        return res
