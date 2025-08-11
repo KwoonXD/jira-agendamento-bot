@@ -1,24 +1,35 @@
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
+from datetime import datetime, date, time
 from collections import defaultdict
 from itertools import chain
 
 from utils.jira_api import JiraAPI
-from utils.messages import gerar_mensagem, verificar_duplicidade
+from utils.messages import gerar_mensagem_whatsapp, verificar_duplicidade
+from utils.export_utils import chamados_to_csv
 
-# Links
+# ====== NOVO: componente de drag-and-drop (Kanban) ======
+try:
+    from streamlit_sortables import sort_items  # pip install streamlit-sortables==0.3.1
+    HAS_SORTABLES = True
+except Exception:
+    HAS_SORTABLES = False
+
+# ── Links (edite se quiser) ───────────────────────────────────────────────────
 ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
 ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
-RAT_URL         = None  # não exibiremos RAT no rodapé (como pediu). Coloque a URL se quiser voltar.
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
-# Config
+# ── Config da página ──────────────────────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
+
 if "history" not in st.session_state:
     st.session_state.history = []
+if "global_filter" not in st.session_state:
+    st.session_state.global_filter = ""
 
-# Helpers
+# ── Helpers ──────────────────────────────────────────────────────────────────
 def parse_dt(raw):
     if not raw:
         return "Não definida"
@@ -39,27 +50,69 @@ def _contar_tipos(itens):
     pdv = len(itens) - desktop
     return pdv, desktop
 
-# Jira
+def is_desktop(ch):
+    return str(ch.get("pdv","")).strip()=="300" or "desktop" in str(ch.get("ativo","")).lower()
+
+def filtrar_detalhes(detalhes, only_pdv, only_desktop, busca_global):
+    out=[]
+    for ch in detalhes:
+        d = is_desktop(ch)
+        if only_pdv and d:
+            continue
+        if only_desktop and not d:
+            continue
+        if busca_global:
+            blob = f"{ch.get('key','')} {ch.get('pdv','')} {ch.get('ativo','')} {ch.get('problema','')} {ch.get('endereco','')} {ch.get('cidade','')}".lower()
+            if busca_global.lower() not in blob:
+                continue
+        out.append(ch)
+    return out
+
+AGEND_PRESETS = {
+    "Manhã (09:00)": time(9, 0, 0),
+    "Tarde (14:00)": time(14, 0, 0),
+    "Noite (19:00)": time(19, 0, 0),
+}
+
+STATUS_STYLE = {
+    "AGENDAMENTO": {"emoji": "🟨", "label": "PENDENTE",  "bg": "#FFF7CC"},
+    "AGENDADO":    {"emoji": "🟩", "label": "AGENDADO",  "bg": "#D9F7D9"},
+    "TEC-CAMPO":   {"emoji": "🟦", "label": "TEC‑CAMPO", "bg": "#D6E8FF"},
+}
+
+def status_badge(status_name: str) -> str:
+    s = STATUS_STYLE.get(status_name.upper(), {"emoji":"⬜️","label":status_name,"bg":"#EEEEEE"})
+    return f"""<span style="background:{s['bg']};padding:4px 8px;border-radius:8px;
+               font-weight:600;font-size:12px">{s['emoji']} {s['label']}</span>"""
+
+def group_title_with_badge(base_title: str, status_name: str) -> str:
+    return f"{base_title} &nbsp;&nbsp; {status_badge(status_name)}"
+
+# ── Jira client ───────────────────────────────────────────────────────────────
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
     "https://delfia.atlassian.net",
 )
 
+# JQLs
 PEND_JQL = 'project = FSA AND status = "AGENDAMENTO"'
 AGEN_JQL = 'project = FSA AND status = "AGENDADO"'
 TEC_JQL  = 'project = FSA AND status = "TEC-CAMPO"'
 
+# Campos (inclui status!)
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279,status"
 )
 
+# ── Busca ─────────────────────────────────────────────────────────────────────
 pendentes_raw = jira.buscar_chamados(PEND_JQL, FIELDS)
 agendados_raw = jira.buscar_chamados(AGEN_JQL, FIELDS)
 tec_campo_raw = jira.buscar_chamados(TEC_JQL,  FIELDS)
 
+# ── Agrupamentos ──────────────────────────────────────────────────────────────
 grouped_agendados = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
     f = issue.get("fields", {})
@@ -79,7 +132,26 @@ for i in chain(pendentes_raw, agendados_raw, tec_campo_raw):
     loja = i["fields"].get("customfield_14954", {}).get("value") or "Loja Desconhecida"
     raw_by_loja[loja].append(i)
 
-# Sidebar (mantive igual ao seu fluxo)
+# ── Barra superior ────────────────────────────────────────────────────────────
+st.title("Painel Field Service")
+
+c1, c2, c3, c4 = st.columns([4,1.2,1.2,1.2])
+with c1:
+    st.session_state.global_filter = st.text_input(
+        "Filtro global (FSA, PDV, ativo, problema, endereço, cidade...)",
+        value=st.session_state.global_filter,
+        placeholder="ex: 303 / CPU / Fortaleza / FSA-123"
+    )
+with c2:
+    st.metric("PENDENTES", len(pendentes_raw))
+with c3:
+    st.metric("AGENDADOS", len(agendados_raw))
+with c4:
+    st.metric("TEC‑CAMPO", len(tec_campo_raw))
+
+st.divider()
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Ações")
     if st.button("↩️ Desfazer última ação"):
@@ -96,7 +168,7 @@ with st.sidebar:
             st.info("Nenhuma ação para desfazer.")
 
     st.markdown("---")
-    st.header("Transição de Chamados")
+    st.header("Transição de Chamados (em massa)")
 
     lojas_pend = set(agrup_pend.keys())
     lojas_ag   = set(chain.from_iterable(stores.keys() for stores in grouped_agendados.values())) if grouped_agendados else set()
@@ -105,63 +177,290 @@ with st.sidebar:
 
     loja_sel = st.selectbox("Selecione a loja:", ["—"] + lojas)
 
-# Abas
-st.title("Painel Field Service")
-tab1, tab2, tab3 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO"])
+    if loja_sel != "—":
+        em_campo = st.checkbox("Técnico está em campo? (agendar + mover/registrar)", value=False)
 
-def _render_whatsapp_block(loja: str, detalhes: list[dict]):
-    """Renderiza exatamente no formato do WhatsApp e dentro de um bloco copiável."""
-    texto = gerar_mensagem(
-        loja, detalhes,
-        ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL,
-        whatsapp_style=True
-    )
+        if em_campo:
+            st.markdown("**Dados de Agendamento (manual)**")
+            preset_sel = st.selectbox("Janela (hoje)", list(AGEND_PRESETS.keys()), index=1)
+            data_sel = st.date_input("Data do Agendamento", value=date.today())
+            hora_sel = st.time_input("Hora", value=AGEND_PRESETS[preset_sel])
+            tem_tecnico = st.checkbox("Possui técnico definido?", value=True)
+            tecnico = st.text_input("Dados do técnico (Nome-CPF-RG-TEL)") if tem_tecnico else ""
+            motivo_sem_tecnico = None
+            if not tem_tecnico:
+                motivo_sem_tecnico = st.selectbox(
+                    "Motivo sem técnico",
+                    ["Sem cobertura na região", "Sem confirmação do técnico", "Janela da loja", "Outro"]
+                )
+
+            dt_iso = datetime.combine(data_sel, hora_sel).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
+            extra_ag = {"customfield_12036": dt_iso}
+            if tecnico:
+                extra_ag["customfield_12279"] = {
+                    "type":"doc","version":1,
+                    "content":[{"type":"paragraph","content":[{"type":"text","text":tecnico}]}]
+                }
+
+            keys_pend  = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            keys_ag    = [i["key"] for i in agendados_raw  if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            keys_tc    = [i["key"] for i in tec_campo_raw  if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            all_keys   = keys_pend + keys_ag + keys_tc
+
+            label_btn = f"Agendar {'e mover → Tec-Campo' if tem_tecnico else 'e comentar sem técnico'} ({len(all_keys)} FSAs)"
+            if st.button(label_btn):
+                errors=[]; moved=0; comentados=0
+
+                for k in keys_pend:
+                    trans = jira.get_transitions(k)
+                    agid  = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
+                    if agid:
+                        r = jira.transicionar_status(k, agid, fields=extra_ag)
+                        if r.status_code != 204:
+                            errors.append(f"{k}⏳{r.status_code}")
+
+                for k in all_keys:
+                    if tem_tecnico:
+                        r = jira.transition_by_name(k, "tec-campo")
+                        if r is not None and r.status_code == 204:
+                            moved += 1
+                        elif r is not None:
+                            errors.append(f"{k}➡️{r.status_code}")
+                    else:
+                        if motivo_sem_tecnico:
+                            c = jira.add_comment(k, f"[BOT] Agendado sem técnico. Motivo: {motivo_sem_tecnico}")
+                            if c.status_code in (200, 201):
+                                comentados += 1
+
+                if errors:
+                    st.error("Erros:"); [st.code(e) for e in errors]
+                else:
+                    msg = f"{len(keys_pend)} agendados. "
+                    if tem_tecnico: msg += f"{moved} movidos → Tec-Campo."
+                    else: msg += f"{comentados} comentário(s) registrados."
+                    st.success(msg)
+
+# ── Abas ───────────────────────────────────────────────────────────────────────
+abas = ["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)"]
+tab1, tab2, tab3, tab4 = st.tabs(abas)
+jira_base = "https://delfia.atlassian.net/browse/"
+
+# ——— COMPONENTE: bloco por loja (reutilizável) ————————————————————————————
+def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
+    colA, colB, colC = st.columns(3)
+    with colA: only_pdv = st.toggle("Somente PDV", key=f"pdv-{status_nome}-{loja}", value=False)
+    with colB: only_desktop = st.toggle("Somente Desktop", key=f"desk-{status_nome}-{loja}", value=False)
+    with colC: st.caption("Filtro global aplicado")
+    detalhes = filtrar_detalhes(detalhes_raw, only_pdv, only_desktop, st.session_state.global_filter)
+
+    texto = gerar_mensagem_whatsapp(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL)
     st.code(texto, language="text")
 
+    if detalhes:
+        st.markdown(
+            "*FSAs:* " + ", ".join(f"[{d['key']}]({jira_base}{d['key']})" for d in detalhes),
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("Nenhum chamado após filtros.")
+
+    exp_col1, exp_col2 = st.columns([1,6])
+    with exp_col1:
+        if st.button("⬇️ Exportar CSV", key=f"csv-{status_nome}-{loja}"):
+            fname = chamados_to_csv(detalhes, filename=f"{loja}-{status_nome.lower()}.csv")
+            st.success(f"Arquivo gerado: {fname}")
+    with exp_col2:
+        st.caption("")
+
+    st.markdown("---")
+
+    with st.form(key=f"qag-{status_nome}-{loja}"):
+        st.subheader("⚡ Agendamento rápido (HOJE)")
+        sel = st.multiselect("Selecione FSAs", [d["key"] for d in detalhes], key=f"sel-{status_nome}-{loja}")
+        preset = st.radio("Janela", list(AGEND_PRESETS.keys()), horizontal=True, index=1, key=f"preset-{status_nome}-{loja}")
+        mover_tc = st.checkbox("Mover para TEC‑CAMPO após agendar", value=False, key=f"mv-{status_nome}-{loja}")
+        tecnico = st.text_input("Dados do técnico (Nome-CPF-RG-TEL) [opcional]", key=f"tec-{status_nome}-{loja}")
+        enviar = st.form_submit_button("Agendar selecionados")
+        if enviar and sel:
+            dt_iso = datetime.combine(date.today(), AGEND_PRESETS[preset]).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
+            extra_ag = {"customfield_12036": dt_iso}
+            if tecnico:
+                extra_ag["customfield_12279"] = {
+                    "type":"doc","version":1,
+                    "content":[{"type":"paragraph","content":[{"type":"text","text":tecnico}]}]
+                }
+            erros, ok_ag, ok_tc = [], 0, 0
+            for k in sel:
+                trans = jira.get_transitions(k)
+                agid  = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
+                if agid:
+                    r = jira.transicionar_status(k, agid, fields=extra_ag)
+                    if r.status_code == 204:
+                        ok_ag += 1
+                    else:
+                        erros.append(f"{k}⏳{r.status_code}")
+                        continue
+                if mover_tc:
+                    t = jira.transition_by_name(k, "tec-campo")
+                    if t is not None and t.status_code == 204:
+                        ok_tc += 1
+                    elif t is not None:
+                        erros.append(f"{k}➡️{t.status_code}")
+            if erros:
+                st.error("Erros:"); [st.code(e) for e in erros]
+            else:
+                st.success(f"{ok_ag} agendados. {(' ' + str(ok_tc) + ' movidos → Tec‑Campo.') if mover_tc else ''}")
+
 with tab1:
-    st.header(f"Chamados PENDENTES de Agendamento ({len(pendentes_raw)})")
+    titulo = group_title_with_badge(f"Chamados PENDENTES ({len(pendentes_raw)})", "AGENDAMENTO")
+    st.markdown(titulo, unsafe_allow_html=True)
     if not pendentes_raw:
         st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
-        for loja, iss in sorted(agrup_pend.items()):
-            qtd_pdv, qtd_desktop = _contar_tipos(iss)
-            titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
-            with st.expander(titulo, expanded=False):
-                _render_whatsapp_block(loja, iss)
+        for loja, itens in sorted(agrup_pend.items()):
+            qtd_pdv, qtd_desktop = _contar_tipos(itens)
+            base = f"{loja} — {len(itens)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
+            header = group_title_with_badge(base, "AGENDAMENTO")
+            with st.expander(header, expanded=False):
+                bloco_por_loja("pendentes", loja, itens)
 
 with tab2:
-    st.header(f"Chamados AGENDADOS ({len(agendados_raw)})")
+    titulo = group_title_with_badge(f"Chamados AGENDADOS ({len(agendados_raw)})", "AGENDADO")
+    st.markdown(titulo, unsafe_allow_html=True)
     if not agendados_raw:
         st.info("Nenhum chamado em AGENDADO.")
     else:
-        for date, stores in sorted(grouped_agendados.items()):
+        for date_key, stores in sorted(grouped_agendados.items()):
             total = sum(len(v) for v in stores.values())
-            st.subheader(f"{date} — {total} chamado(s)")
+            st.subheader(f"{date_key} — {total} chamado(s)")
             for loja, iss in sorted(stores.items()):
                 detalhes = jira.agrupar_chamados(iss)[loja]
                 qtd_pdv, qtd_desktop = _contar_tipos(detalhes)
                 dup_keys = [d["key"] for d in detalhes if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
                 tag_str = f" [Dup: {', '.join(dup_keys)}]" if dup_keys else ""
-                titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop){tag_str}"
-                with st.expander(titulo, expanded=False):
-                    st.markdown("*FSAs:* " + ", ".join(d["key"] for d in detalhes))
-                    _render_whatsapp_block(loja, detalhes)
+                base = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop){tag_str}"
+                header = group_title_with_badge(base, "AGENDADO")
+                with st.expander(header, expanded=False):
+                    bloco_por_loja("agendados", loja, detalhes)
 
 with tab3:
-    st.header(f"Chamados TEC-CAMPO ({len(tec_campo_raw)})")
+    titulo = group_title_with_badge(f"Chamados TEC‑CAMPO ({len(tec_campo_raw)})", "TEC-CAMPO")
+    st.markdown(titulo, unsafe_allow_html=True)
     if not tec_campo_raw:
-        st.info("Nenhum chamado em TEC-CAMPO.")
+        st.info("Nenhum chamado em TEC‑CAMPO.")
     else:
-        for date, stores in sorted(grouped_tec_campo.items()):
+        for date_key, stores in sorted(grouped_tec_campo.items()):
             total = sum(len(v) for v in stores.values())
-            st.subheader(f"{date} — {total} chamado(s)")
+            st.subheader(f"{date_key} — {total} chamado(s)")
             for loja, iss in sorted(stores.items()):
                 detalhes = jira.agrupar_chamados(iss)[loja]
                 qtd_pdv, qtd_desktop = _contar_tipos(detalhes)
-                titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
-                with st.expander(titulo, expanded=False):
-                    st.markdown(f"*FSAs:* {', '.join(d['key'] for d in detalhes)}")
-                    _render_whatsapp_block(loja, detalhes)
+                base = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
+                header = group_title_with_badge(base, "TEC-CAMPO")
+                with st.expander(header, expanded=False):
+                    bloco_por_loja("tec-campo", loja, detalhes)
+
+# ===================== KANBAN (arrastar & soltar) ============================
+with tab4:
+    st.subheader("Kanban por Loja (arraste os FSAs entre colunas para transicionar)")
+    if not HAS_SORTABLES:
+        st.error("Instale o pacote: streamlit-sortables==0.3.1")
+    else:
+        # Config de agendamento default (usada quando mover para AGENDADO)
+        cka, ckb = st.columns([2, 3])
+        with cka:
+            preset = st.selectbox("Janela (hoje) para novos AGENDADOS", list(AGEND_PRESETS.keys()), index=1)
+        with ckb:
+            tecnico = st.text_input("Dados do técnico (Nome-CPF-RG-TEL) [opcional]")
+        dt_iso_default = datetime.combine(date.today(), AGEND_PRESETS[preset]).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
+
+        lojas_all = sorted(raw_by_loja.keys())
+        loja_kanban = st.selectbox("Loja", ["—"] + lojas_all, index=1 if lojas_all else 0)
+
+        if loja_kanban == "—" or not lojas_all:
+            st.info("Selecione uma loja.")
+        else:
+            # Monta listas por status para a loja
+            def status_of(issue):
+                return (issue.get("fields",{}).get("status",{}) or {}).get("name","").upper()
+
+            pend_keys = [i["key"] for i in raw_by_loja[loja_kanban] if status_of(i)=="AGENDAMENTO"]
+            agen_keys = [i["key"] for i in raw_by_loja[loja_kanban] if status_of(i)=="AGENDADO"]
+            tecc_keys = [i["key"] for i in raw_by_loja[loja_kanban] if status_of(i)=="TEC-CAMPO"]
+
+            original = [
+                {"header": "🟨 AGENDAMENTO", "items": pend_keys},
+                {"header": "🟩 AGENDADO",    "items": agen_keys},
+                {"header": "🟦 TEC‑CAMPO",   "items": tecc_keys},
+            ]
+
+            custom_css = """
+            .sortable-component{gap:1rem}
+            .sortable-container{background:#F7F7F9;border:1px solid #e5e7eb;border-radius:12px;padding:10px;min-height:280px}
+            .sortable-container-header{font-weight:700;padding:6px 8px}
+            .sortable-item{background:white;border:1px solid #e5e7eb;border-radius:10px;padding:8px 10px;margin:6px 0}
+            """
+
+            st.caption("Dica: arraste múltiplos itens um por vez; ao finalizar, clique em **Aplicar mudanças**.")
+            sorted_struct = sort_items(original, multi_containers=True, custom_style=custom_css)
+
+            # Botão para efetivar as transições detectadas
+            if st.button("Aplicar mudanças"):
+                # Calcula diffs: onde cada key ficou
+                pos = {}
+                for idx_cont, cont in enumerate(sorted_struct):
+                    header = cont["header"]
+                    colname = "AGENDAMENTO" if "AGENDAMENTO" in header else ("AGENDADO" if "AGENDADO" in header else "TEC-CAMPO")
+                    for key in cont["items"]:
+                        pos[key] = colname
+
+                # Aplica transições conforme destino de cada key (comparando com estado real no Jira)
+                erros, ok_agendar, ok_tc, ok_back = [], 0, 0, 0
+                for key in (pend_keys + agen_keys + tecc_keys):
+                    desired = pos.get(key)
+                    if not desired:
+                        continue
+                    # pega status atual
+                    cur_issue = jira.get_issue(key)
+                    cur_status = (cur_issue.get("fields",{}).get("status",{}) or {}).get("name","").upper()
+
+                    if desired == cur_status:
+                        continue  # nada a fazer
+
+                    if desired == "AGENDADO":
+                        # transição de agendar + preenchimento padrão
+                        extra_ag = {"customfield_12036": dt_iso_default}
+                        if tecnico:
+                            extra_ag["customfield_12279"] = {
+                                "type":"doc","version":1,
+                                "content":[{"type":"paragraph","content":[{"type":"text","text":tecnico}]}]
+                            }
+                        trans = jira.get_transitions(key)
+                        agid  = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
+                        if not agid:
+                            erros.append(f"{key}: transição 'Agendar' não encontrada")
+                            continue
+                        r = jira.transicionar_status(key, agid, fields=extra_ag)
+                        if r.status_code == 204: ok_agendar += 1
+                        else: erros.append(f"{key}⏳{r.status_code}")
+
+                    elif desired == "TEC-CAMPO":
+                        r = jira.transition_by_name(key, "tec-campo")
+                        if r is not None and r.status_code == 204: ok_tc += 1
+                        elif r is not None: erros.append(f"{key}➡️{r.status_code}")
+                        else: erros.append(f"{key}: transição para Tec‑Campo não encontrada")
+
+                    elif desired == "AGENDAMENTO":
+                        # tenta voltar para a coluna de agendamento (nome do status destino 'Agendamento')
+                        r = jira.transition_by_name(key, "agendament")  # aceita 'Agendamento'
+                        if r is not None and r.status_code == 204: ok_back += 1
+                        elif r is not None: erros.append(f"{key}↩️{r.status_code}")
+                        else: erros.append(f"{key}: transição para Agendamento não encontrada")
+
+                if erros:
+                    st.error("Erros ao aplicar mudanças:"); [st.code(e) for e in erros]
+                else:
+                    st.success(f"OK: {ok_agendar}→AGENDADO, {ok_tc}→TEC‑CAMPO, {ok_back}→AGENDAMENTO")
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
