@@ -6,4 +6,5 @@ plotly
 streamlit-authenticator>=0.2.4
 pyyaml
 fpdf
+streamlit-sortables==0.3.1
 
