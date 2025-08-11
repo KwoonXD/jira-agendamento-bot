@@ -13,9 +13,6 @@ class JiraAPI:
         }
 
     def buscar_chamados(self, jql: str, fields: str) -> list:
-        """
-        Busca issues via JQL e retorna lista de issues.
-        """
         params = {
             "jql": jql,
             "maxResults": 100,
@@ -30,7 +27,7 @@ class JiraAPI:
     def agrupar_chamados(self, issues: list) -> dict:
         """
         Agrupa issues por customfield_14954 (loja) e retorna dict:
-        { loja_value: [ {key, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
+        { loja_value: [ {key, status, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
         """
         from collections import defaultdict
         agrup = defaultdict(list)
@@ -39,6 +36,7 @@ class JiraAPI:
             loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
             agrup[loja].append({
                 "key": issue.get("key"),
+                "status": f.get("status", {}).get("name", "--"),
                 "pdv": f.get("customfield_14829", "--"),
                 "ativo": f.get("customfield_14825", {}).get("value", "--"),
                 "problema": f.get("customfield_12374", "--"),
@@ -51,9 +49,6 @@ class JiraAPI:
         return agrup
 
     def get_transitions(self, issue_key: str) -> list:
-        """
-        Retorna lista de transições disponíveis para a issue.
-        """
         url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
         res = requests.get(url, headers=self.headers, auth=self.auth)
         if res.status_code == 200:
@@ -61,21 +56,13 @@ class JiraAPI:
         return []
 
     def get_issue(self, issue_key: str) -> dict:
-        """
-        Retorna JSON completo da issue (ou pelo menos os campos necessários como status).
-        """
         url = f"{self.jira_url}/rest/api/3/issue/{issue_key}"
-        # busca só o campo status para history
         res = requests.get(url, headers=self.headers, auth=self.auth, params={"fields": "status"})
         if res.status_code == 200:
             return res.json()
         return {}
 
     def transicionar_status(self, issue_key: str, transition_id: str, fields: dict = None) -> requests.Response:
-        """
-        Executa transição de status. Se campos forem fornecidos, inclui no payload.
-        Retorna o objeto Response para inspeção de status/erro.
-        """
         payload = {"transition": {"id": str(transition_id)}}
         if fields:
             payload["fields"] = fields
