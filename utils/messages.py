@@ -1,21 +1,11 @@
-# utils/messages.py
 from datetime import datetime
 
-# --- Helpers ---------------------------------------------------------------
-
 def _classificar_tipo(ch: dict) -> str:
-    """
-    "Desktop" se PDV == 300 ou se 'desktop' aparecer no campo ATIVO (case-insensitive).
-    Caso contrário, "PDV".
-    """
     pdv = str(ch.get("pdv", "")).strip()
     ativo = str(ch.get("ativo", "")).lower()
     if pdv == "300" or "desktop" in ativo:
         return "Desktop"
     return "PDV"
-
-
-# --- Mensagem para WhatsApp ------------------------------------------------
 
 def gerar_mensagem_whatsapp(
     loja: str,
@@ -24,16 +14,6 @@ def gerar_mensagem_whatsapp(
     iso_pdv_url: str | None = None,
     rat_url: str | None = None,
 ) -> str:
-    """
-    Gera a mensagem no formato que você vem usando:
-    - Um bloco por FSA (sem data agendada).
-    - Um único bloco de endereço ao final.
-    - Depois do endereço, a seção "⚠️ É OBRIGATÓRIO LEVAR" com links:
-        • ISO do Desktop (se houver ao menos 1 Desktop)
-        • ISO do PDV     (se houver ao menos 1 PDV)
-        • RAT            (sempre que informado)
-    """
-
     if not chamados:
         return "—"
 
@@ -44,12 +24,9 @@ def gerar_mensagem_whatsapp(
 
     for ch in chamados:
         tipo = _classificar_tipo(ch)
-        if tipo == "Desktop":
-            tem_desktop = True
-        else:
-            tem_pdv = True
+        if tipo == "Desktop": tem_desktop = True
+        else: tem_pdv = True
 
-        # bloco do chamado (sem data)
         linhas_total.extend([
             f"{ch.get('key','--')}",
             f"Loja {loja}",
@@ -59,7 +36,6 @@ def gerar_mensagem_whatsapp(
             "***"
         ])
 
-        # guardamos o endereço (exibimos 1x ao final)
         endereco_info = (
             ch.get('endereco','--'),
             ch.get('estado','--'),
@@ -67,7 +43,6 @@ def gerar_mensagem_whatsapp(
             ch.get('cidade','--'),
         )
 
-    # bloco único de endereço
     if endereco_info:
         linhas_total.extend([
             "",
@@ -88,13 +63,7 @@ def gerar_mensagem_whatsapp(
 
     return "\n".join(linhas_total)
 
-
-# --- Duplicidade -----------------------------------------------------------
-
 def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
-    """
-    Retorna um set de tuplas (pdv, ativo) que aparecem mais de uma vez.
-    """
     seen = {}
     duplicates = set()
     for ch in chamados:
