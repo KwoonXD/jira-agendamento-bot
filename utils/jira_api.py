@@ -1,28 +1,89 @@
-    # --- Operacional extra ---
+import requests
+from requests.auth import HTTPBasicAuth
+from collections import defaultdict
 
-    def add_comment(self, issue_key: str, body: str):
+
+class JiraAPI:
+    def __init__(self, email: str, api_token: str, jira_url: str):
+        self.email = email
+        self.api_token = api_token
+        self.jira_url = jira_url.rstrip('/')
+        self.auth = HTTPBasicAuth(self.email, self.api_token)
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+
+    def buscar_chamados(self, jql: str, fields: str) -> list:
+        params = {
+            "jql": jql,
+            "maxResults": 100,
+            "fields": fields
+        }
+        url = f"{self.jira_url}/rest/api/3/search"
+        res = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+        if res.status_code == 200:
+            return res.json().get("issues", [])
+        return []
+
+    def agrupar_chamados(self, issues: list) -> dict:
+        """
+        Agrupa issues por customfield_14954 (loja) e retorna:
+        { loja_value: [ {key, status, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
+        """
+        agrup = defaultdict(list)
+        for issue in issues:
+            f = issue.get("fields", {})
+            loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+            agrup[loja].append({
+                "key": issue.get("key"),
+                "status": f.get("status", {}).get("name", "--"),
+                "pdv": f.get("customfield_14829", "--"),
+                "ativo": f.get("customfield_14825", {}).get("value", "--"),
+                "problema": f.get("customfield_12374", "--"),
+                "endereco": f.get("customfield_12271", "--"),
+                "estado": f.get("customfield_11948", {}).get("value", "--"),
+                "cep": f.get("customfield_11993", "--"),
+                "cidade": f.get("customfield_11994", "--"),
+                "data_agendada": f.get("customfield_12036")
+            })
+        return agrup
+
+    def get_transitions(self, issue_key: str) -> list:
+        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
+        res = requests.get(url, headers=self.headers, auth=self.auth)
+        if res.status_code == 200:
+            return res.json().get("transitions", [])
+        return []
+
+    def transition_by_name(self, issue_key: str, transition_name: str, fields: dict = None) -> bool:
+        transitions = self.get_transitions(issue_key)
+        for t in transitions:
+            if t.get("name", "").lower() == transition_name.lower():
+                self.transicionar_status(issue_key, t["id"], fields)
+                return True
+        return False
+
+    def get_issue(self, issue_key: str, fields: str = "status") -> dict:
+        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}"
+        res = requests.get(url, headers=self.headers, auth=self.auth, params={"fields": fields})
+        if res.status_code == 200:
+            return res.json()
+        return {}
+
+    def transicionar_status(self, issue_key: str, transition_id: str, fields: dict = None) -> requests.Response:
+        payload = {"transition": {"id": str(transition_id)}}
+        if fields:
+            payload["fields"] = fields
+        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
+        res = requests.post(url, headers=self.headers, auth=self.auth, json=payload)
+        return res
+
+    def add_comment(self, issue_key: str, body: str) -> bool:
+        """
+        Adiciona um comentário a um chamado no Jira.
+        """
         url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/comment"
         payload = {"body": body}
-        return requests.post(url, headers=self.headers, auth=self.auth, json=payload)
-
-    def set_assignee(self, issue_key: str, account_id: str = None, email: str = None):
-        """
-        Atribui issue. Recomendado usar accountId.
-        Se passar email, Jira Cloud precisa que você habilite 'user picker by email'.
-        """
-        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/assignee"
-        if account_id:
-            payload = {"accountId": account_id}
-        elif email:
-            payload = {"emailAddress": email}
-        else:
-            payload = {"accountId": None}  # desatribuir
-        return requests.put(url, headers=self.headers, auth=self.auth, json=payload)
-
-    def transition_by_name(self, issue_key: str, to_name_contains: str, fields: dict | None = None):
-        """Procura a transição pelo nome de destino (contains, case-insensitive) e executa."""
-        trans = self.get_transitions(issue_key)
-        target = next((t for t in trans if to_name_contains.lower() in t.get("to", {}).get("name", "").lower()), None)
-        if not target:
-            return None
-        return self.transicionar_status(issue_key, target["id"], fields=fields)
+        res = requests.post(url, headers=self.headers, auth=self.auth, json=payload)
+        return res.status_code == 201
