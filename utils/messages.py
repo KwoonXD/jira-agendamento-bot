@@ -1,16 +1,6 @@
 # utils/messages.py
 from datetime import datetime
 
-def _fmt_data_agendada(raw):
-    if not raw:
-        return "--"
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y %H:%M")
-        except Exception:
-            pass
-    return str(raw)
-
 def _classificar_tipo(ch):
     """Desktop se PDV == 300 ou se 'desktop' aparecer em ATIVO (case-insensitive)."""
     pdv = str(ch.get("pdv", "")).strip()
@@ -22,14 +12,21 @@ def _classificar_tipo(ch):
 def gerar_mensagem(loja, chamados, iso_desktop_url=None, iso_pdv_url=None, rat_url=None):
     """
     Mensagem por loja, listando FSAs e exibindo endereço uma única vez.
-    Inclui Status, Data agendada e links (RAT sempre; ISO conforme Desktop/PDV).
+    - Não exibe 'Data agendada'
+    - RAT: aparece em cada FSA
+    - ISO: aparece uma única vez, abaixo do endereço; mostra Desktop/PDV conforme houver chamados do tipo.
     """
     blocos = []
     endereco_info = None
+    tem_desktop = False
+    tem_pdv = False
 
     for ch in chamados:
         tipo = _classificar_tipo(ch)
-        iso_link = iso_desktop_url if tipo == "Desktop" else iso_pdv_url
+        if tipo == "Desktop":
+            tem_desktop = True
+        else:
+            tem_pdv = True
 
         linhas = [
             f"*{ch.get('key','--')}*",
@@ -39,16 +36,16 @@ def gerar_mensagem(loja, chamados, iso_desktop_url=None, iso_pdv_url=None, rat_u
             f"*ATIVO: {ch.get('ativo','--')}*",
             f"Tipo de atendimento: {tipo}",
             f"Problema: {ch.get('problema','--')}",
-            f"Data agendada: {_fmt_data_agendada(ch.get('data_agendada'))}",
         ]
+
+        # RAT sempre por chamado
         if rat_url:
             linhas.append(f"RAT: {rat_url}")
-        if iso_link:
-            linhas.append(f"ISO ({tipo}): {iso_link}")
 
         linhas.append("***")
         blocos.append("\n".join(linhas))
 
+        # guarda endereço (uma vez só ao final)
         endereco_info = (
             ch.get('endereco','--'),
             ch.get('estado','--'),
@@ -56,20 +53,27 @@ def gerar_mensagem(loja, chamados, iso_desktop_url=None, iso_pdv_url=None, rat_u
             ch.get('cidade','--')
         )
 
+    # bloco único de endereço + ISO(s) logo abaixo
     if endereco_info:
-        blocos.append(
-            "\n".join([
-                f"Endereço: {endereco_info[0]}",
-                f"Estado: {endereco_info[1]}",
-                f"CEP: {endereco_info[2]}",
-                f"Cidade: {endereco_info[3]}",
-            ])
-        )
+        endereco_bloco = [
+            f"Endereço: {endereco_info[0]}",
+            f"Estado: {endereco_info[1]}",
+            f"CEP: {endereco_info[2]}",
+            f"Cidade: {endereco_info[3]}",
+        ]
+        # ISO(s) após o endereço, somente os necessários
+        if tem_desktop and iso_desktop_url:
+            endereco_bloco.append(f"ISO (Desktop): {iso_desktop_url}")
+        if tem_pdv and iso_pdv_url:
+            endereco_bloco.append(f"ISO (PDV): {iso_pdv_url}")
+
+        blocos.append("\n".join(endereco_bloco))
 
     return "\n\n".join(blocos)
 
 def verificar_duplicidade(chamados):
-    seen, duplicates = {}, set()
+    seen = {}
+    duplicates = set()
     for ch in chamados:
         key = (ch.get("pdv"), ch.get("ativo"))
         if key in seen:
