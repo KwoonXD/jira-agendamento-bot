@@ -7,11 +7,16 @@ from itertools import chain
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# ── Config da página e auto‑refresh (90s)
+# ──────────────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
 
-# ── Helpers ──
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+# Helpers
 def parse_dt(raw):
     if not raw:
         return "Não definida"
@@ -22,54 +27,52 @@ def parse_dt(raw):
             pass
     return "Não definida"
 
-# ── Histórico de undo ──
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-# ── Jira ──
+# Jira client
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
-    "https://delfia.atlassian.net"
+    "https://delfia.atlassian.net",
 )
 
-# Campos (inclui 'status' para exibir)
+# Campos (inclui status para exibição)
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279,status"
 )
 
-# 1) Pendentes
+# ──────────────────────────────────────────────────────────────────────────────
+# Carregamento dos chamados
+# ──────────────────────────────────────────────────────────────────────────────
 pendentes_raw = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
-agrup_pend    = jira.agrupar_chamados(pendentes_raw)
-
-# 2) Agendados e Tec-Campo (separados)
 agendados_raw = jira.buscar_chamados("project = FSA AND status = AGENDADO", FIELDS)
 tec_campo_raw = jira.buscar_chamados("project = FSA AND status = TEC-CAMPO", FIELDS)
 
-# Agrupar por data → loja
+# Agrupadores por data -> loja
 grouped_agendados = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
     f = issue.get("fields", {})
     loja = f.get("customfield_14954", {}).get("value") or "Loja Desconhecida"
-    data_str = parse_dt(f.get("customfield_12036"))
-    grouped_agendados[data_str][loja].append(issue)
+    grouped_agendados[parse_dt(f.get("customfield_12036"))][loja].append(issue)
 
 grouped_tec_campo = defaultdict(lambda: defaultdict(list))
 for issue in tec_campo_raw:
     f = issue.get("fields", {})
     loja = f.get("customfield_14954", {}).get("value") or "Loja Desconhecida"
-    data_str = parse_dt(f.get("customfield_12036"))
-    grouped_tec_campo[data_str][loja].append(issue)
+    grouped_tec_campo[parse_dt(f.get("customfield_12036"))][loja].append(issue)
 
-# 3) Raw por loja para transições em massa
+# Agrupar pendentes por loja (para exibição com messages.py)
+agrup_pend = jira.agrupar_chamados(pendentes_raw)
+
+# Para transições em massa (por loja)
 raw_by_loja = defaultdict(list)
 for i in chain(pendentes_raw, agendados_raw, tec_campo_raw):
     loja = i["fields"].get("customfield_14954", {}).get("value") or "Loja Desconhecida"
     raw_by_loja[loja].append(i)
 
-# ── Sidebar: Ações + Transições ──
+# ──────────────────────────────────────────────────────────────────────────────
+# Sidebar: ações e transições
+# ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Ações")
     if st.button("↩️ Desfazer última ação"):
@@ -78,10 +81,7 @@ with st.sidebar:
             reverted = 0
             for key in action["keys"]:
                 trans = jira.get_transitions(key)
-                rev_id = next(
-                    (t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]),
-                    None
-                )
+                rev_id = next((t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]), None)
                 if rev_id and jira.transicionar_status(key, rev_id).status_code == 204:
                     reverted += 1
             st.success(f"Revertido: {reverted} FSAs → {action['from']}")
@@ -91,7 +91,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("Transição de Chamados")
 
-    # lojas (seguro mesmo com grupos vazios)
+    # Lojas — união segura de todos os grupos (sem StopIteration)
     lojas_pend = set(agrup_pend.keys())
     lojas_ag   = set(chain.from_iterable(stores.keys() for stores in grouped_agendados.values())) if grouped_agendados else set()
     lojas_tc   = set(chain.from_iterable(stores.keys() for stores in grouped_tec_campo.values())) if grouped_tec_campo else set()
@@ -105,8 +105,8 @@ with st.sidebar:
 
         if em_campo:
             st.markdown("**Dados de Agendamento**")
-            data    = st.date_input("Data do Agendamento")
-            hora    = st.time_input("Hora do Agendamento")
+            data = st.date_input("Data do Agendamento")
+            hora = st.time_input("Hora do Agendamento")
             tecnico = st.text_input("Dados dos Técnicos (Nome-CPF-RG-TEL)") if tem_tecnico else ""
 
             dt_iso = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
@@ -141,8 +141,10 @@ with st.sidebar:
                         tcid = next((t["id"] for t in trans if "tec-campo" in t.get("to", {}).get("name", "").lower()), None)
                         if tcid:
                             r = jira.transicionar_status(k, tcid)
-                            if r.status_code == 204: moved += 1
-                            else: errors.append(f"{k}➡️{r.status_code}")
+                            if r.status_code == 204:
+                                moved += 1
+                            else:
+                                errors.append(f"{k}➡️{r.status_code}")
                     else:
                         sem_tecnico.append(k)
 
@@ -153,8 +155,9 @@ with st.sidebar:
                         st.success(f"{moved} FSAs agendados/movidos → Tec-Campo")
                     else:
                         st.warning(f"Sem técnico: {', '.join(sem_tecnico)} (apenas agendados)")
+
         else:
-            # Fluxo manual (inclui pendentes, agendados e tec-campo)
+            # Transição manual (pendentes + agendados + tec-campo)
             opts = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts += [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts += [i["key"] for i in tec_campo_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
@@ -192,12 +195,14 @@ with st.sidebar:
                         st.success(f"{mv} FSAs movidos → {choice}")
                         st.session_state.history.append({"keys": sel, "from": prev})
 
-# ── Abas de visualização ──
+# ──────────────────────────────────────────────────────────────────────────────
+# Abas de visualização
+# ──────────────────────────────────────────────────────────────────────────────
 st.title("Painel Field Service")
 tab1, tab2, tab3 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO"])
 
 with tab1:
-    st.header("Chamados PENDENTES de Agendamento")
+    st.header(f"Chamados PENDENTES de Agendamento ({len(pendentes_raw)})")
     if not pendentes_raw:
         st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
@@ -206,7 +211,7 @@ with tab1:
                 st.code(gerar_mensagem(loja, iss), language="text")
 
 with tab2:
-    st.header("Chamados AGENDADOS")
+    st.header(f"Chamados AGENDADOS ({len(agendados_raw)})")
     if not agendados_raw:
         st.info("Nenhum chamado em AGENDADO.")
     else:
@@ -216,21 +221,16 @@ with tab2:
             for loja, iss in sorted(stores.items()):
                 detalhes = jira.agrupar_chamados(iss)[loja]
                 dup_keys = [d["key"] for d in detalhes if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
-                spare_raw = jira.buscar_chamados(
-                    f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}',
-                    FIELDS
-                )
-                spare_keys = [i["key"] for i in spare_raw]
+                # tag opcional de spare/dup
                 tags = []
-                if spare_keys: tags.append("Spare: " + ", ".join(spare_keys))
-                if dup_keys:   tags.append("Dup: " + ", ".join(dup_keys))
+                if dup_keys: tags.append("Dup: " + ", ".join(dup_keys))
                 tag_str = f" [{' • '.join(tags)}]" if tags else ""
                 with st.expander(f"{loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
                     st.markdown("*FSAs:* " + ", ".join(d["key"] for d in detalhes))
                     st.code(gerar_mensagem(loja, detalhes), language="text")
 
 with tab3:
-    st.header("Chamados TEC-CAMPO")
+    st.header(f"Chamados TEC-CAMPO ({len(tec_campo_raw)})")
     if not tec_campo_raw:
         st.info("Nenhum chamado em TEC-CAMPO.")
     else:
