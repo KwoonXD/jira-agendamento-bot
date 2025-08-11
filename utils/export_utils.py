@@ -6,6 +6,7 @@ def chamados_to_csv(chamados, filename="chamados_exportados.csv"):
     df.to_csv(filename, index=False)
     return filename
 
+
 def chamados_to_pdf(chamados, filename="chamados_exportados.pdf"):
     pdf = FPDF()
     pdf.add_page()
