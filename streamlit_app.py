@@ -1,3 +1,4 @@
+# streamlit_app.py
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
@@ -7,12 +8,18 @@ from itertools import chain
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
+# ── Links (pode trocar se quiser) ─────────────────────────────────────────────
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
+
+# ── Setup ────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
-
 if "history" not in st.session_state:
     st.session_state.history = []
 
+# ── Helpers ─────────────────────────────────────────────────────────────────
 def parse_dt(raw):
     if not raw:
         return "Não definida"
@@ -23,16 +30,28 @@ def parse_dt(raw):
             pass
     return "Não definida"
 
+def _contar_tipos(itens):
+    """Conta PDV/Desktop. Desktop se PDV==300 ou 'desktop' no ATIVO."""
+    desktop = 0
+    for ch in itens:
+        pdv_val = str(ch.get("pdv", "")).strip()
+        ativo   = str(ch.get("ativo", "")).lower()
+        if pdv_val == "300" or "desktop" in ativo:
+            desktop += 1
+    pdv = len(itens) - desktop
+    return pdv, desktop
+
+# ── Jira client ──────────────────────────────────────────────────────────────
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
     "https://delfia.atlassian.net",
 )
 
-# ⚠️ IMPORTANTE: status com hífen precisa de aspas
+# Status com aspas (TEC-CAMPO tem hífen)
 PEND_JQL = 'project = FSA AND status = "AGENDAMENTO"'
-AGEN_JQL  = 'project = FSA AND status = "AGENDADO"'
-TEC_JQL   = 'project = FSA AND status = "TEC-CAMPO"'
+AGEN_JQL = 'project = FSA AND status = "AGENDADO"'
+TEC_JQL  = 'project = FSA AND status = "TEC-CAMPO"'
 
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
@@ -40,32 +59,12 @@ FIELDS = (
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279,status"
 )
 
-# ── Busca
+# ── Busca ────────────────────────────────────────────────────────────────────
 pendentes_raw = jira.buscar_chamados(PEND_JQL, FIELDS)
 agendados_raw = jira.buscar_chamados(AGEN_JQL, FIELDS)
 tec_campo_raw = jira.buscar_chamados(TEC_JQL,  FIELDS)
 
-# ── Diagnóstico rápido (não interfere na UI)
-with st.expander("🔎 Diagnóstico (ajuda quando tudo aparece vazio)", expanded=False):
-    st.write({
-        "PENDENTES_len": len(pendentes_raw),
-        "AGENDADOS_len": len(agendados_raw),
-        "TEC-CAMPO_len": len(tec_campo_raw),
-        "sample_pend": [i.get("key") for i in pendentes_raw[:3]],
-        "sample_ag":   [i.get("key") for i in agendados_raw[:3]],
-        "sample_tc":   [i.get("key") for i in tec_campo_raw[:3]],
-        "JQLs": {"pend": PEND_JQL, "agend": AGEN_JQL, "tec": TEC_JQL}
-    })
-    if not (pendentes_raw or agendados_raw or tec_campo_raw):
-        st.info(
-            "Ainda está tudo vazio. Verifique:\n"
-            "• O nome dos **Status** no Jira é exatamente “AGENDAMENTO”, “AGENDADO” e “TEC-CAMPO”?\n"
-            "• O **projeto** é ‘FSA’ mesmo?\n"
-            "• O **EMAIL/API_TOKEN** em `st.secrets` estão corretos?\n"
-            "• O usuário do token tem permissão de **Browse** no projeto?"
-        )
-
-# ── Agrupamentos
+# ── Agrupamentos por data → loja ─────────────────────────────────────────────
 grouped_agendados = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
     f = issue.get("fields", {})
@@ -78,14 +77,16 @@ for issue in tec_campo_raw:
     loja = f.get("customfield_14954", {}).get("value") or "Loja Desconhecida"
     grouped_tec_campo[parse_dt(f.get("customfield_12036"))][loja].append(issue)
 
+# Pendentes já vêm prontos p/ exibição via utils.messages
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
+# Para transições em massa (por loja)
 raw_by_loja = defaultdict(list)
 for i in chain(pendentes_raw, agendados_raw, tec_campo_raw):
     loja = i["fields"].get("customfield_14954", {}).get("value") or "Loja Desconhecida"
     raw_by_loja[loja].append(i)
 
-# ── Sidebar
+# ── Sidebar: ações e transições ──────────────────────────────────────────────
 with st.sidebar:
     st.header("Ações")
     if st.button("↩️ Desfazer última ação"):
@@ -125,8 +126,9 @@ with st.sidebar:
             extra_ag = {"customfield_12036": dt_iso}
             if tecnico:
                 extra_ag["customfield_12279"] = {
-                    "type": "doc", "version": 1,
-                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}]
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}],
                 }
 
             keys_pend = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
@@ -136,6 +138,8 @@ with st.sidebar:
 
             if st.button(f"Agendar e mover {len(all_keys)} FSAs"):
                 errors, moved, sem_tecnico = [], 0, []
+
+                # agendar pendentes
                 for k in keys_pend:
                     trans = jira.get_transitions(k)
                     agid = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
@@ -143,16 +147,21 @@ with st.sidebar:
                         r = jira.transicionar_status(k, agid, fields=extra_ag)
                         if r.status_code != 204:
                             errors.append(f"{k}⏳{r.status_code}")
+
+                # mover conforme técnico
                 for k in all_keys:
                     if tem_tecnico:
                         trans = jira.get_transitions(k)
                         tcid = next((t["id"] for t in trans if "tec-campo" in t.get("to", {}).get("name", "").lower()), None)
                         if tcid:
                             r = jira.transicionar_status(k, tcid)
-                            if r.status_code == 204: moved += 1
-                            else: errors.append(f"{k}➡️{r.status_code}")
+                            if r.status_code == 204:
+                                moved += 1
+                            else:
+                                errors.append(f"{k}➡️{r.status_code}")
                     else:
                         sem_tecnico.append(k)
+
                 if errors:
                     st.error("Erros:"); [st.code(e) for e in errors]
                 else:
@@ -160,10 +169,13 @@ with st.sidebar:
                         st.success(f"{moved} FSAs agendados/movidos → Tec-Campo")
                     else:
                         st.warning(f"Sem técnico: {', '.join(sem_tecnico)} (apenas agendados)")
+
         else:
+            # Transição manual (pendentes + agendados + tec-campo)
             opts = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts += [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             opts += [i["key"] for i in tec_campo_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+
             sel = st.multiselect("Selecione FSAs:", sorted(set(opts)))
             extra = {}; choice = None; trans_opts = {}
             if sel:
@@ -178,8 +190,9 @@ with st.sidebar:
                     if tec:
                         extra["customfield_12279"] = {
                             "type": "doc", "version": 1,
-                            "content": [{"type": "paragraph", "content": [{"type": "text", "text": tec}]}]
+                            "content": [{"type": "paragraph", "content": [{"type": "text", "text": tec}]}],
                         }
+
             if st.button("Aplicar"):
                 if not sel or choice in (None, "—"):
                     st.warning("Selecione FSAs e transição.")
@@ -188,49 +201,74 @@ with st.sidebar:
                     errs, mv = [], 0
                     for k in sel:
                         r = jira.transicionar_status(k, trans_opts[choice], fields=extra or None)
-                        if r.status_code == 204: mv += 1
-                        else: errs.append(f"{k}:{r.status_code}")
+                        if r.status_code == 204:
+                            mv += 1
+                        else:
+                            errs.append(f"{k}:{r.status_code}")
                     if errs:
                         st.error("Falhas:"); [st.code(e) for e in errs]
                     else:
                         st.success(f"{mv} FSAs movidos → {choice}")
                         st.session_state.history.append({"keys": sel, "from": prev})
 
-# ── Abas
+# ── Abas ──────────────────────────────────────────────────────────────────────
 st.title("Painel Field Service")
 tab1, tab2, tab3 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO"])
 
 with tab1:
     st.header(f"Chamados PENDENTES de Agendamento ({len(pendentes_raw)})")
-    if not pendentes_raw: st.warning("Nenhum chamado em AGENDAMENTO.")
+    if not pendentes_raw:
+        st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
-        for loja, iss in jira.agrupar_chamados(pendentes_raw).items():
-            with st.expander(f"{loja} — {len(iss)} chamado(s)", expanded=False):
-                st.code(gerar_mensagem(loja, iss), language="text")
+        for loja, iss in sorted(agrup_pend.items()):
+            qtd_pdv, qtd_desktop = _contar_tipos(iss)
+            titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
+            with st.expander(titulo, expanded=False):
+                st.code(
+                    gerar_mensagem(loja, iss, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL),
+                    language="text"
+                )
 
 with tab2:
     st.header(f"Chamados AGENDADOS ({len(agendados_raw)})")
-    if not agendados_raw: st.info("Nenhum chamado em AGENDADO.")
+    if not agendados_raw:
+        st.info("Nenhum chamado em AGENDADO.")
     else:
         for date, stores in sorted(grouped_agendados.items()):
             total = sum(len(v) for v in stores.values())
             st.subheader(f"{date} — {total} chamado(s)")
             for loja, iss in sorted(stores.items()):
                 detalhes = jira.agrupar_chamados(iss)[loja]
-                st.markdown("*FSAs:* " + ", ".join(d["key"] for d in detalhes))
-                st.code(gerar_mensagem(loja, detalhes), language="text")
+                qtd_pdv, qtd_desktop = _contar_tipos(detalhes)
+                # dup opcional
+                dup_keys = [d["key"] for d in detalhes if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
+                tag_str = f" [Dup: {', '.join(dup_keys)}]" if dup_keys else ""
+                titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop){tag_str}"
+                with st.expander(titulo, expanded=False):
+                    st.markdown("*FSAs:* " + ", ".join(d["key"] for d in detalhes))
+                    st.code(
+                        gerar_mensagem(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL),
+                        language="text"
+                    )
 
 with tab3:
     st.header(f"Chamados TEC-CAMPO ({len(tec_campo_raw)})")
-    if not tec_campo_raw: st.info("Nenhum chamado em TEC-CAMPO.")
+    if not tec_campo_raw:
+        st.info("Nenhum chamado em TEC-CAMPO.")
     else:
         for date, stores in sorted(grouped_tec_campo.items()):
             total = sum(len(v) for v in stores.values())
             st.subheader(f"{date} — {total} chamado(s)")
             for loja, iss in sorted(stores.items()):
                 detalhes = jira.agrupar_chamados(iss)[loja]
-                st.markdown(f"*FSAs:* {', '.join(d['key'] for d in detalhes)}")
-                st.code(gerar_mensagem(loja, detalhes), language="text")
+                qtd_pdv, qtd_desktop = _contar_tipos(detalhes)
+                titulo = f"{loja} — {len(iss)} chamado(s) ({qtd_pdv} PDV • {qtd_desktop} Desktop)"
+                with st.expander(titulo, expanded=False):
+                    st.markdown(f"*FSAs:* {', '.join(d['key'] for d in detalhes)}")
+                    st.code(
+                        gerar_mensagem(loja, detalhes, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL),
+                        language="text"
+                    )
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
