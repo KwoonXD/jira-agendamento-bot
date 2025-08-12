@@ -1,4 +1,3 @@
-# utils/messages.py
 from datetime import datetime
 
 def _fmt_data_agendada(raw):
@@ -9,52 +8,59 @@ def _fmt_data_agendada(raw):
             return datetime.strptime(raw, fmt).strftime("%d/%m/%Y %H:%M")
         except Exception:
             pass
-    return str(raw)
+    return "--"
 
-def _is_desktop_item(ch):
-    # Regras: PDV 300 => Desktop, OU ativo contém "desktop"
-    pdv = str(ch.get("pdv", "")).strip()
-    ativo = str(ch.get("ativo", "")).lower()
+def _is_desktop(ch):
+    # Desktop = PDV 300 OU 'desktop' em ATIVO
+    pdv = str(ch.get("pdv","")).strip()
+    ativo = str(ch.get("ativo","")).lower()
     return pdv == "300" or "desktop" in ativo
 
-def gerar_mensagem_whatsapp(loja, chamados, iso_desktop_url, iso_pdv_url, rat_url):
+def gerar_mensagem_whatsapp(
+    loja: str,
+    chamados: list[dict],
+    iso_desktop_url: str,
+    iso_pdv_url: str,
+    rat_url: str,
+    incluir_status: bool = False,
+    incluir_tipo: bool = False,
+) -> str:
     """
-    Mensagem formatada por loja para WhatsApp.
-    - NÃO exibe Status nem 'Tipo de atendimento'
-    - NÃO exibe Data agendada nos itens
-    - Exibe endereço (uma vez) e, abaixo, o bloco 'É OBRIGATÓRIO LEVAR'
-      com ISO (por tipo) e RAT.
+    Mensagem por loja, listando FSAs e exibindo endereço uma única vez.
+    - NÃO coloca Status nem Tipo de atendimento quando flags=False
+    - ISO e RAT vão APENAS na seção 'É OBRIGATÓRIO LEVAR'
     """
     blocos = []
     endereco_info = None
-    precisa_iso_pdv = False
-    precisa_iso_desktop = False
 
     for ch in chamados:
-        # Flags ISO por item
-        if _is_desktop_item(ch):
-            precisa_iso_desktop = True
-        else:
-            precisa_iso_pdv = True
+        linhas = []
+        linhas.append(f"*{ch.get('key','--')}*")
+        linhas.append(f"Loja: {loja}")
+        # Status e Tipo só se solicitado explicitamente
+        if incluir_status:
+            linhas.append(f"Status: {ch.get('status','--')}")
+        if incluir_tipo:
+            linhas.append(f"Tipo de atendimento: {'Desktop' if _is_desktop(ch) else 'PDV'}")
 
-        linhas = [
-            f"*{ch.get('key','--')}*",
-            f"Loja: {loja}",
-            f"PDV: {ch.get('pdv','--')}",
-            f"*ATIVO: {ch.get('ativo','--')}*",
-            f"Problema: {ch.get('problema','--')}",
-            "***"
-        ]
+        linhas.append(f"PDV: {ch.get('pdv','--')}")
+        linhas.append(f"*ATIVO:* {ch.get('ativo','--')}")
+        linhas.append(f"Problema: {ch.get('problema','--')}")
+        # NÃO mostrar data agendada na mensagem ao técnico (pedido do usuário)
+        # linhas.append(f"Data agendada: {_fmt_data_agendada(ch.get('data_agendada'))}")
+        linhas.append("***")
+
         blocos.append("\n".join(linhas))
 
+        # armazenar endereço para mostrar 1 única vez ao final
         endereco_info = (
             ch.get('endereco','--'),
             ch.get('estado','--'),
             ch.get('cep','--'),
-            ch.get('cidade','--')
+            ch.get('cidade','--'),
         )
 
-    # Endereço uma vez
+    # Endereço único
     if endereco_info:
         blocos.append(
             "\n".join([
@@ -62,15 +68,23 @@ def gerar_mensagem_whatsapp(loja, chamados, iso_desktop_url, iso_pdv_url, rat_ur
                 f"Estado: {endereco_info[1]}",
                 f"CEP: {endereco_info[2]}",
                 f"Cidade: {endereco_info[3]}",
-                "------",
-                "⚠️ *É OBRIGATÓRIO LEVAR:*",
-                *( [f"• ISO do Desktop: {iso_desktop_url}"] if precisa_iso_desktop else [] ),
-                *( [f"• ISO do PDV: {iso_pdv_url}"] if precisa_iso_pdv else [] ),
-                f"• RAT: {rat_url}",
             ])
         )
 
-    return "\n\n".join(blocos)
+    # Seção obrigatória (ISO escolhida por PDV/Desktop + RAT)
+    precisa_desktop = any(_is_desktop(ch) for ch in chamados)
+    iso_url = iso_desktop_url if precisa_desktop else iso_pdv_url
+
+    blocos.append(
+        "\n".join([
+            "------",
+            "⚠️ *É OBRIGATÓRIO LEVAR:*",
+            f"• ISO ({'Desktop' if precisa_desktop else 'PDV'}) <{iso_url}>",
+            f"• RAT <{rat_url}>",
+        ])
+    )
+
+    return "\n".join(blocos)
 
 def verificar_duplicidade(chamados):
     seen = {}
