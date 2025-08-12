@@ -1,98 +1,86 @@
 from datetime import datetime
 
-def _fmt_data_agendada(raw):
-    if not raw:
-        return "--"
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y %H:%M")
-        except Exception:
-            pass
-    return "--"
+# Links padrão – personalize à vontade
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
-def _is_desktop(ch):
-    # Desktop = PDV 300 OU 'desktop' em ATIVO
-    pdv = str(ch.get("pdv","")).strip()
-    ativo = str(ch.get("ativo","")).lower()
-    return pdv == "300" or "desktop" in ativo
 
-def gerar_mensagem_whatsapp(
-    loja: str,
-    chamados: list[dict],
-    iso_desktop_url: str,
-    iso_pdv_url: str,
-    rat_url: str,
-    incluir_status: bool = False,
-    incluir_tipo: bool = False,
-) -> str:
+def _is_desktop(pdv: str, ativo: str) -> bool:
+    return (pdv or "").strip() == "300" or "desktop" in (ativo or "").lower()
+
+
+def _fmt(msg: str) -> str:
+    return (msg or "").strip()
+
+
+def gerar_mensagem_whatsapp(loja: str, chamados: list,
+                            url_iso_desktop: str = ISO_DESKTOP_URL,
+                            url_iso_pdv: str = ISO_PDV_URL,
+                            url_rat: str = RAT_URL) -> str:
     """
-    Mensagem por loja, listando FSAs e exibindo endereço uma única vez.
-    - NÃO coloca Status nem Tipo de atendimento quando flags=False
-    - ISO e RAT vão APENAS na seção 'É OBRIGATÓRIO LEVAR'
+    Gera texto para WhatsApp agrupado por loja.
+    Regras:
+    - NÃO exibe "Status" nem "Tipo de atendimento".
+    - A seção 'É OBRIGATÓRIO LEVAR' contém ISO (Desktop/PDV) e RAT.
     """
     blocos = []
-    endereco_info = None
+    endereco_ref = None
+    precisa_desktop = False
+    precisa_pdv = False
 
     for ch in chamados:
-        linhas = []
-        linhas.append(f"*{ch.get('key','--')}*")
-        linhas.append(f"Loja: {loja}")
-        # Status e Tipo só se solicitado explicitamente
-        if incluir_status:
-            linhas.append(f"Status: {ch.get('status','--')}")
-        if incluir_tipo:
-            linhas.append(f"Tipo de atendimento: {'Desktop' if _is_desktop(ch) else 'PDV'}")
+        pdv = _fmt(ch.get("pdv"))
+        ativo = _fmt(ch.get("ativo"))
+        desktop = _is_desktop(pdv, ativo)
+        if desktop:
+            precisa_desktop = True
+        else:
+            precisa_pdv = True
 
-        linhas.append(f"PDV: {ch.get('pdv','--')}")
-        linhas.append(f"*ATIVO:* {ch.get('ativo','--')}")
-        linhas.append(f"Problema: {ch.get('problema','--')}")
-        # NÃO mostrar data agendada na mensagem ao técnico (pedido do usuário)
-        # linhas.append(f"Data agendada: {_fmt_data_agendada(ch.get('data_agendada'))}")
-        linhas.append("***")
-
+        linhas = [
+            f"*{ch.get('key','')}*",
+            f"Loja: {loja}",
+            f"PDV: {pdv}",
+            f"*ATIVO:* {ativo}",
+            f"Problema: {_fmt(ch.get('problema'))}",
+            "***",
+        ]
         blocos.append("\n".join(linhas))
 
-        # armazenar endereço para mostrar 1 única vez ao final
-        endereco_info = (
-            ch.get('endereco','--'),
-            ch.get('estado','--'),
-            ch.get('cep','--'),
-            ch.get('cidade','--'),
+        endereco_ref = (
+            _fmt(ch.get("endereco")),
+            _fmt(ch.get("estado")),
+            _fmt(ch.get("cep")),
+            _fmt(ch.get("cidade")),
         )
 
-    # Endereço único
-    if endereco_info:
-        blocos.append(
-            "\n".join([
-                f"Endereço: {endereco_info[0]}",
-                f"Estado: {endereco_info[1]}",
-                f"CEP: {endereco_info[2]}",
-                f"Cidade: {endereco_info[3]}",
-            ])
+    if endereco_ref:
+        end_txt = "\n".join(
+            [
+                f"Endereço: {endereco_ref[0]}",
+                f"Estado: {endereco_ref[1]}",
+                f"CEP: {endereco_ref[2]}",
+                f"Cidade: {endereco_ref[3]}",
+                "------",
+                "⚠️ *É OBRIGATÓRIO LEVAR:*",
+                f"• ISO do {'Desktop' if precisa_desktop and not precisa_pdv else 'PDV'}"
+                f" ({'Desktop' if precisa_desktop else 'PDV'}): "
+                f"{url_iso_desktop if precisa_desktop else url_iso_pdv}",
+                f"• RAT: {url_rat}",
+            ]
         )
+        blocos.append(end_txt)
 
-    # Seção obrigatória (ISO escolhida por PDV/Desktop + RAT)
-    precisa_desktop = any(_is_desktop(ch) for ch in chamados)
-    iso_url = iso_desktop_url if precisa_desktop else iso_pdv_url
+    return "\n\n".join(blocos)
 
-    blocos.append(
-        "\n".join([
-            "------",
-            "⚠️ *É OBRIGATÓRIO LEVAR:*",
-            f"• ISO ({'Desktop' if precisa_desktop else 'PDV'}) <{iso_url}>",
-            f"• RAT <{rat_url}>",
-        ])
-    )
 
-    return "\n".join(blocos)
-
-def verificar_duplicidade(chamados):
-    seen = {}
-    duplicates = set()
+def verificar_duplicidade(chamados: list) -> set[tuple[str, str]]:
+    vistos, dup = set(), set()
     for ch in chamados:
-        key = (ch.get("pdv"), ch.get("ativo"))
-        if key in seen:
-            duplicates.add(key)
+        key = (_fmt(ch.get("pdv")), _fmt(ch.get("ativo")))
+        if key in vistos:
+            dup.add(key)
         else:
-            seen[key] = True
-    return duplicates
+            vistos.add(key)
+    return dup
