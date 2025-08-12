@@ -7,20 +7,26 @@ from typing import Dict, List, Tuple
 import streamlit as st
 
 from utils.jira_api import JiraAPI
-from utils.messages import gerar_mensagem, verificar_duplicidade, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL
+from utils.messages import (
+    gerar_mensagem,
+    verificar_duplicidade,
+    ISO_DESKTOP_URL,
+    ISO_PDV_URL,
+    RAT_URL,
+)
 
-# ====== tenta importar streamlit-sortables (diferentes versões) ======
+# ====== tenta importar streamlit-sortables (várias versões) ======
 sort_items_v031 = None
 sort_items_legacy = None
 try:
     from streamlit_sortables import sort_items as _sort_items_candidate
-    sort_items_v031 = _sort_items_candidate  # pode ser 0.3.x ou outra
+    sort_items_v031 = _sort_items_candidate
 except Exception:
     pass
 if sort_items_v031 is None:
     try:
         from streamlit_sortables import sort_items as _sort_items_legacy
-        sort_items_legacy = _sort_items_legacy  # fallback extra
+        sort_items_legacy = _sort_items_legacy
     except Exception:
         pass
 
@@ -34,7 +40,10 @@ BADGES = {
 }
 def badge(texto: str) -> str:
     b = BADGES.get(texto.upper(), {"bg": "#EEE", "fg": "#111"})
-    return f"<span style='background:{b['bg']};padding:4px 8px;border-radius:8px;font-weight:600;font-size:12px;color:{b['fg']};'>{texto}</span>"
+    return (
+        f"<span style='background:{b['bg']};padding:4px 8px;border-radius:8px;"
+        f"font-weight:600;font-size:12px;color:{b['fg']};'>{texto}</span>"
+    )
 
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "30"))
 
@@ -100,58 +109,72 @@ def _expander_titulo(loja: str, detalhes: list) -> str:
     return f"{loja} — {qtd} chamado(s) ({q_pdv} PDV · {q_desktop} Desktop)"
 
 # ============== KANBAN helpers (compat de versões) ==================
-def _kanban_items(keys: List[str]) -> List[dict]:
-    # formato 0.3.x: lista de dicts
-    return [{"header": k, "index": k} for k in keys]
+def _containers_payload(col1: List[str], col2: List[str], col3: List[str]) -> List[Dict]:
+    """
+    Formato que o streamlit-sortables (multi_containers=True) espera:
+    [
+      {'header': 'AGENDAMENTO', 'items': [...]},
+      {'header': 'AGENDADO',    'items': [...]},
+      {'header': 'TEC-CAMPO',   'items': [...]},
+    ]
+    """
+    return [
+        {"header": "AGENDAMENTO", "items": col1},
+        {"header": "AGENDADO",    "items": col2},
+        {"header": "TEC-CAMPO",   "items": col3},
+    ]
 
-def _plain_from_struct(items: List[dict]) -> List[str]:
-    return [it.get("header") or it.get("index") or "" for it in items]
+def _extract_items_from_containers(sorted_payload: List[Dict]) -> Tuple[List[str], List[str], List[str]]:
+    if not isinstance(sorted_payload, (list, tuple)) or len(sorted_payload) != 3:
+        return [], [], []
+    a = list(sorted_payload[0].get("items", []))
+    b = list(sorted_payload[1].get("items", []))
+    c = list(sorted_payload[2].get("items", []))
+    return a, b, c
 
 def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], styles: dict):
     """
-    Tenta várias assinaturas:
-      1) sort_items(items: list[list[dict]], multi_containers=True, direction='vertical', styles=..., key=...)
-      2) sort_items(items: list[list[dict]], multi_containers=True, direction='vertical', key=...)
-      3) sort_items(items: list[list[str]])  # legado
-    Sempre retorna (list[str], list[str], list[str])
+    Tenta as diferentes assinaturas do componente:
+      1) sort_items(payload_multi, multi_containers=True, direction='vertical', styles=..., key=...)
+      2) sort_items(payload_multi, multi_containers=True, direction='vertical', key=...)
+      3) sort_items([col1, col2, col3])  # legado (uma versão bem antiga)
+    Retorna sempre (list[str], list[str], list[str]).
     """
-    # 0.3.x (multi containers) – estrutura de dicts
-    items_struct = [_kanban_items(col1), _kanban_items(col2), _kanban_items(col3)]
+    payload_multi = _containers_payload(col1, col2, col3)
 
     if sort_items_v031:
         # tenta com styles
         try:
             res = sort_items_v031(
-                items_struct,
+                payload_multi,
                 multi_containers=True,
                 direction="vertical",
                 styles=styles,
                 key="kanban",
             )
-            if isinstance(res, (list, tuple)) and len(res) == 3:
-                a, b, c = res
-                return _plain_from_struct(a), _plain_from_struct(b), _plain_from_struct(c)
+            a, b, c = _extract_items_from_containers(res)
+            if a or b or c:
+                return a, b, c
         except TypeError:
             pass
         # tenta sem styles
         try:
             res = sort_items_v031(
-                items_struct,
+                payload_multi,
                 multi_containers=True,
                 direction="vertical",
                 key="kanban",
             )
-            if isinstance(res, (list, tuple)) and len(res) == 3:
-                a, b, c = res
-                return _plain_from_struct(a), _plain_from_struct(b), _plain_from_struct(c)
+            a, b, c = _extract_items_from_containers(res)
+            if a or b or c:
+                return a, b, c
         except TypeError:
             pass
-        # última tentativa: API antiga esperando listas simples
+        # fallback bem antigo: listas simples
         try:
             res = sort_items_v031([col1, col2, col3])
             if isinstance(res, (list, tuple)) and len(res) == 3:
-                a, b, c = res
-                return list(a), list(b), list(c)
+                return list(res[0]), list(res[1]), list(res[2])
         except Exception:
             pass
 
@@ -159,12 +182,11 @@ def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], style
         try:
             res = sort_items_legacy([col1, col2, col3])
             if isinstance(res, (list, tuple)) and len(res) == 3:
-                a, b, c = res
-                return list(a), list(b), list(c)
+                return list(res[0]), list(res[1]), list(res[2])
         except Exception:
             pass
 
-    # fallback: não mudou nada
+    # Nada deu: devolve original
     return col1, col2, col3
 
 # ====== session / topo ======
@@ -193,6 +215,9 @@ with st.sidebar:
     filtro_global = st.text_input("Filtro global (FSA, Loja, PDV, Ativo…)", "").strip()
 
 # ====== bloco reutilizável ======
+def _search_local(filtro_local: str, detalhes: list) -> list:
+    return _search_filter(filtro_local, detalhes) if filtro_local else detalhes
+
 def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
     colf1, colf2, colf3 = st.columns([0.4, 0.3, 0.3])
     with colf1:
@@ -206,8 +231,7 @@ def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
     detalhes = detalhes_raw
     if filtro_global:
         detalhes = _search_filter(filtro_global, detalhes)
-    if filtro:
-        detalhes = _search_filter(filtro, detalhes)
+    detalhes = _search_local(filtro, detalhes)
     if only_pdv:
         detalhes = [d for d in detalhes if not _is_desktop(d.get("pdv"), d.get("ativo"))]
     if only_desk:
@@ -216,38 +240,27 @@ def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
     st.markdown("**FSAs:** " + (", ".join(d["key"] for d in detalhes) if detalhes else "_Nenhum FSA._"))
     st.code(gerar_mensagem(loja, detalhes), language="text")
 
+def _render_grupo(titulo: str, status_nome: str, grupo: Dict[str, list], tab_key: str):
+    total = sum(len(v) for v in grupo.values())
+    _render_header(titulo, status_nome, total)
+    if not grupo:
+        st.info(f"Nenhum chamado em {status_nome}.")
+        return
+    for loja, detalhes in sorted(grupo.items()):
+        with st.expander(_expander_titulo(loja, detalhes), expanded=False):
+            bloco_por_loja(tab_key, loja, detalhes)
+
 # ====== TABS ======
 tab1, tab2, tab3, tab4 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)"])
 
 with tab1:
-    total = sum(len(v) for v in grp_pend.values())
-    _render_header("Chamados PENDENTES", "PENDENTE", total)
-    if not grp_pend:
-        st.info("Nenhum chamado em AGENDAMENTO.")
-    else:
-        for loja, detalhes in sorted(grp_pend.items()):
-            with st.expander(_expander_titulo(loja, detalhes), expanded=False):
-                bloco_por_loja("pendentes", loja, detalhes)
+    _render_grupo("Chamados PENDENTES", "PENDENTE", grp_pend, "pendentes")
 
 with tab2:
-    total = sum(len(v) for v in grp_agnd.values())
-    _render_header("Chamados AGENDADOS", "AGENDADO", total)
-    if not grp_agnd:
-        st.info("Nenhum chamado em AGENDADO.")
-    else:
-        for loja, detalhes in sorted(grp_agnd.items()):
-            with st.expander(_expander_titulo(loja, detalhes), expanded=False):
-                bloco_por_loja("agendados", loja, detalhes)
+    _render_grupo("Chamados AGENDADOS", "AGENDADO", grp_agnd, "agendados")
 
 with tab3:
-    total = sum(len(v) for v in grp_tec.values())
-    _render_header("Chamados TEC‑CAMPO", "TEC-CAMPO", total)
-    if not grp_tec:
-        st.info("Nenhum chamado em TEC‑CAMPO.")
-    else:
-        for loja, detalhes in sorted(grp_tec.items()):
-            with st.expander(_expander_titulo(loja, detalhes), expanded=False):
-                bloco_por_loja("tec", loja, detalhes)
+    _render_grupo("Chamados TEC‑CAMPO", "TEC-CAMPO", grp_tec, "tec")
 
 with tab4:
     st.markdown("Dica: arraste; ao finalizar, clique em **Aplicar mudanças**.")
@@ -269,8 +282,9 @@ with tab4:
     with cols[2]: st.markdown("**TEC-CAMPO**")
 
     styles = {
-        "container": {"background": "#0B0F14", "minHeight": "280px"},
-        "item": {"background": "#0D3B66", "padding": "10px", "margin": "8px", "borderRadius": "8px", "color":"#fff"},
+        "container": {"background": "#0B0F14", "minHeight": "280px", "padding": "8px"},
+        "item": {"background": "#0D3B66", "padding": "10px", "margin": "8px",
+                 "borderRadius": "8px", "color": "#fff"},
     }
 
     new_col1, new_col2, new_col3 = _sort_three_columns(col1_items, col2_items, col3_items, styles)
