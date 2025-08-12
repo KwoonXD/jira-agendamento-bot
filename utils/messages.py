@@ -1,7 +1,7 @@
 # utils/messages.py
 from typing import Iterable, Dict, Any, List, Set, Tuple
 
-# Links padrão – personalize se quiser via st.secrets no app
+# Links padrão – personalize via st.secrets no app, se quiser
 ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
 ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
 RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
@@ -22,7 +22,7 @@ def _fmt_endereco(ch: Dict[str, Any]) -> List[str]:
 def gerar_mensagem(loja: str, chamados: Iterable[Dict[str, Any]]) -> str:
     """
     Gera o texto para WhatsApp/Teams (sem Status e sem Tipo de atendimento).
-    Inclui bloco '⚠️ É OBRIGATÓRIO LEVAR' no final com ISO(s) e RAT.
+    Inclui bloco '⚠️ É OBRIGATÓRIO LEVAR' com ISO(s) e RAT no final.
     """
     chamados = list(chamados)  # materializa
     blocos: List[str] = []
@@ -39,17 +39,11 @@ def gerar_mensagem(loja: str, chamados: Iterable[Dict[str, Any]]) -> str:
         blocos.append("\n".join(linhas))
 
     # Endereço (uma vez por loja — pega do último chamado que tenha dados)
-    ref = next(
-        (c for c in reversed(chorados := chamados)  # noqa: F841 (apenas pra manter compat lint, mas não usar 'chorados')
-        if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade"))),
-        None
-    )
-    # corrigindo explicitamente o nome usado:
-    ref = next(
-        (c for c in reversed(chamados)
-         if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade"))),
-        None
-    )
+    ref = None
+    for c in reversed(chamados):
+        if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade")):
+            ref = c
+            break
     if ref:
         blocos.append("\n".join(_fmt_endereco(ref)))
 
