@@ -1,7 +1,7 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
 import streamlit as st
@@ -14,6 +14,25 @@ from utils.messages import (
     ISO_PDV_URL,
     RAT_URL,
 )
+
+# =============================================================================
+# CONFIGURAÇÃO DOS CAMPOS NO JIRA (edite se necessário)
+# =============================================================================
+# Campo de Data/Hora de Agendamento (datetime):
+SCHEDULE_DATE_FIELD = "customfield_12036"
+# Campo de Técnico (texto curto):
+TECH_NAME_FIELD = "customfield_12279"
+# Opcional: deslocamento de fuso horário na formatação pro Jira, ex: "-0300"
+JIRA_TZ_OFFSET = os.getenv("JIRA_TZ_OFFSET", "-0300")
+
+def _fmt_dt_to_jira(dt: datetime) -> str:
+    """Formata datetime para o padrão do Jira (com offset)."""
+    # segundos com milissegundos zerados + offset (ex: 2025-08-11T16:00:00.000-0300)
+    return dt.strftime(f"%Y-%m-%dT%H:%M:%S.000{JIRA_TZ_OFFSET}")
+
+# =============================================================================
+# STREAMLIT / UI
+# =============================================================================
 
 # ====== tenta importar streamlit-sortables (várias versões) ======
 sort_items_v031 = None
@@ -53,6 +72,7 @@ JQLS = {
     "tec": 'project = FSA AND status = "TEC-CAMPO"',
 }
 
+# IMPORTANTE: estes campos incluem os que usamos no agendamento (12036, 12279)
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,customfield_12374,"
     "customfield_12271,customfield_11993,customfield_11994,customfield_11948,"
@@ -286,14 +306,13 @@ with tab4:
                  "borderRadius": "8px", "color": "#fff"},
     }
 
-    new_col1, new_col2, new_col3 = _sort_three_columns(col1_items, col2_items, col3_items, styles)
-
     def _col_of(item: str, c1, c2, c3) -> str:
         if item in c1: return "AGENDAMENTO"
         if item in c2: return "AGENDADO"
         if item in c3: return "TEC-CAMPO"
         return "?"
 
+    new_col1, new_col2, new_col3 = _sort_three_columns(col1_items, col2_items, col3_items, styles)
     original = {i: _col_of(i, col1_items, col2_items, col3_items) for i in (col1_items + col2_items + col3_items)}
     atual    = {i: _col_of(i, new_col1,   new_col2,   new_col3)   for i in (new_col1   + new_col2   + new_col3)}
 
@@ -323,6 +342,8 @@ with tab4:
                 if not tid:
                     falhas.append(f"{issue_key}: transição para '{novo_status}' não disponível")
                     continue
+
+                # Kanban não preenche campos; se exigir campos, Jira retornará erro
                 r = jira.transicionar_status(issue_key, tid)
                 if r.status_code == 204:
                     ok += 1
@@ -339,11 +360,10 @@ with tab4:
         st.cache_data.clear()
         (getattr(st, "rerun", getattr(st, "experimental_rerun", lambda: None)))()
 
-# ================== TRANSIÇÃO EM LOTE ==================
+# ================== TRANSIÇÃO EM LOTE (com AGENDAMENTO) ==================
 with tab5:
     st.subheader("Transição em Lote")
 
-    # Fonte (status origem)
     status_origem = st.radio(
         "Origem",
         ["PENDENTE", "AGENDADO", "TEC-CAMPO", "TODOS"],
@@ -351,7 +371,6 @@ with tab5:
         index=3,
     )
 
-    # Monta lista base
     base = []
     if status_origem in ("PENDENTE", "TODOS"):
         base += _flat(grp_pend, "PENDENTE")
@@ -360,7 +379,6 @@ with tab5:
     if status_origem in ("TEC-CAMPO", "TODOS"):
         base += _flat(grp_tec,  "TEC-CAMPO")
 
-    # Filtros
     lojas_disponiveis = sorted({r["loja"] for r in base})
     colf1, colf2, colf3, colf4 = st.columns([0.25, 0.25, 0.25, 0.25])
     with colf1:
@@ -372,7 +390,6 @@ with tab5:
     with colf4:
         only_desktop = st.toggle("Somente Desktop", value=False)
 
-    # Aplica filtros
     filtrados = base
     if loja_sel != "(todas)":
         filtrados = [r for r in filtrados if r["loja"] == loja_sel]
@@ -389,7 +406,6 @@ with tab5:
     if only_desktop:
         filtrados = [r for r in filtrados if r["is_desktop"]]
 
-    # Tabela com seleção
     import pandas as pd
     df = pd.DataFrame(filtrados, columns=["key", "loja", "status", "pdv", "ativo", "problema", "is_desktop"])
     if df.empty:
@@ -399,7 +415,6 @@ with tab5:
                                 "problema": "Problema", "is_desktop": "Desktop"})
         df.insert(0, "Selecionar", False)
 
-        # Data editor
         edited = st.data_editor(
             df,
             hide_index=True,
@@ -416,11 +431,25 @@ with tab5:
         with colb1:
             if st.button("Marcar todos (filtrados)"):
                 edited["Selecionar"] = True
-                st.session_state["lote_editor"] = edited  # atualiza a tabela
-                st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
+                st.session_state["lote_editor"] = edited
+                (getattr(st, "rerun", getattr(st, "experimental_rerun", lambda: None)))()
 
         # Escolhe destino
         destino = st.selectbox("Mover selecionados para:", ["AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
+
+        # ---- Campos obrigatórios (quando sair de PENDENTE para AGENDADO) ----
+        need_agendamento = destino.upper() == "AGENDADO"
+        pendentes_selecionados = edited[(edited["Selecionar"] == True) & (edited["Status"].str.upper() == "PENDENTE")]  # noqa: E712
+
+        col_ag, col_t = st.columns([0.5, 0.5])
+        with col_ag:
+            if need_agendamento:
+                st.markdown("##### Campos de agendamento (aplicados aos itens **PENDENTES** selecionados)")
+                default_dt = datetime.now() + timedelta(hours=1)
+                dt_ag = st.datetime_input("Data/hora do agendamento", value=default_dt, step=300)
+        with col_t:
+            if need_agendamento:
+                tech_name = st.text_input("Técnico responsável", placeholder="Nome do técnico")
 
         # Filtra selecionados e remove os que já estão no destino
         selecionados = edited[edited["Selecionar"] == True]  # noqa: E712
@@ -429,14 +458,26 @@ with tab5:
         else:
             candidatos = selecionados
 
-        n = len(candidatos)
-        st.caption(f"{len(selecionados)} selecionado(s); {n} com status diferente do destino.")
+        # Validação: se vai para AGENDADO e há itens PENDENTES, exigir campos
+        disable_apply = False
+        helper_msg = ""
+        if need_agendamento and not pendentes_selecionados.empty:
+            if not tech_name or dt_ag is None:
+                disable_apply = True
+                helper_msg = "Informe técnico e data/hora para agendar os itens em PENDENTE."
 
-        # Botão aplicar
-        if st.button(f"Aplicar transição em lote ({n})", type="primary", disabled=(n == 0)):
+        n_total = len(candidatos)
+        st.caption(f"{len(selecionados)} selecionado(s); {n_total} com status diferente do destino.")
+        if helper_msg:
+            st.warning(helper_msg)
+
+        if st.button(f"Aplicar transição em lote ({n_total})", type="primary", disabled=(n_total == 0 or disable_apply)):
             ok, falhas = 0, []
             for _, row in candidatos.iterrows():
                 issue_key = row["FSA"]
+                src_status = row["Status"].upper()
+
+                # resolve transition id
                 try:
                     trans = jira.get_transitions(issue_key)
                     tid = next(
@@ -446,7 +487,20 @@ with tab5:
                     if not tid:
                         falhas.append(f"{issue_key}: transição para '{destino}' não disponível")
                         continue
-                    r = jira.transicionar_status(issue_key, tid)
+                except Exception as e:
+                    falhas.append(f"{issue_key}: {e}")
+                    continue
+
+                # Se indo para AGENDADO e o chamado está em PENDENTE -> envia campos obrigatórios
+                payload_fields = None
+                if need_agendamento and src_status == "PENDENTE":
+                    payload_fields = {
+                        SCHEDULE_DATE_FIELD: _fmt_dt_to_jira(dt_ag),
+                        TECH_NAME_FIELD: tech_name,
+                    }
+
+                try:
+                    r = jira.transicionar_status(issue_key, tid, fields=payload_fields)
                     if r.status_code == 204:
                         ok += 1
                     else:
