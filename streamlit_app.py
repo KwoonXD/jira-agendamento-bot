@@ -1,204 +1,301 @@
 # streamlit_app.py
-import streamlit as st
+import os
 from collections import defaultdict
-from streamlit_sortables import sort_items
+from datetime import datetime
+from itertools import chain
+
+import streamlit as st
+
+# Kanban (drag & drop)
+try:
+    from streamlit_sortables import sort_items
+    SORTABLES_AVAILABLE = True
+except Exception:
+    SORTABLES_AVAILABLE = False
 
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem_whatsapp, verificar_duplicidade
 
+# ===================== Config & Links =====================
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 
-# ==================== helpers de UI ====================
-def badge(text, kind="pending"):
-    colors = {
-        "pending":  ("#FFB84D", "🟧"),
-        "scheduled":("#31D0AA", "🟩"),
-        "tec":      ("#2DA1FF", "🟦"),
-    }
-    bg, _ = colors.get(kind, ("#444", "⬛"))
-    return (
-        f'<span style="background:{bg}33; padding:4px 10px; '
-        f'border-radius:10px; font-weight:700; font-size:12px; '
-        f'border:1px solid {bg}; color:#fff;">{text}</span>'
-    )
+ISO_DESKTOP_URL = os.getenv("ISO_DESKTOP_URL", "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link")
+ISO_PDV_URL     = os.getenv("ISO_PDV_URL",     "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link")
+RAT_URL         = os.getenv("RAT_URL",         "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing")
 
-st.title("📱 Painel Field Service")
+JQLS = {
+    "pend":  'project = FSA AND status = "AGENDAMENTO"',
+    "agend": 'project = FSA AND status = "AGENDADO"',
+    "tec":   'project = FSA AND status = "TEC-CAMPO"',
+}
 
-# ==================== JIRA client ======================
+FIELDS = (
+    "status,summary,customfield_14954,customfield_14829,customfield_14825,"
+    "customfield_12374,customfield_12271,customfield_11993,"
+    "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
+)
+
+# ===================== Jira API =====================
 jira = JiraAPI(
     st.secrets["EMAIL"],
     st.secrets["API_TOKEN"],
-    st.secrets.get("JIRA_URL", "https://delfia.atlassian.net"),
+    "https://delfia.atlassian.net"
 )
 
-FIELDS = (
-    "summary,customfield_14954,customfield_14829,customfield_14825,"
-    "customfield_12374,customfield_12271,customfield_11993,customfield_11994,"
-    "customfield_11948,customfield_12036,status"
-)
-
-JQL_PEND   = 'project = FSA AND status = "AGENDAMENTO"'
-JQL_AGEND  = 'project = FSA AND status = "AGENDADO"'
-JQL_TEC    = 'project = FSA AND status = "TEC-CAMPO"'
-
-# ==================== CACHE (reduz delay) ===============
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_issues(jql: str):
-    return jira.buscar_chamados(jql, FIELDS)
+def load_issues(jql: str, fields: str):
+    return jira.buscar_chamados(jql, fields)
 
-@st.cache_data(ttl=60, show_spinner=False)
-def agrupar(issues: list):
-    return jira.agrupar_chamados(issues)
+def group_by_date_store(issues: list):
+    g = defaultdict(lambda: defaultdict(list))
+    for it in issues:
+        f = it.get("fields", {})
+        loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+        raw  = f.get("customfield_12036")
+        if raw:
+            try:
+                dt = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z")
+            except Exception:
+                try:
+                    dt = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S%z")
+                except Exception:
+                    dt = None
+        else:
+            dt = None
+        data_str = dt.strftime("%d/%m/%Y") if dt else "Sem data"
+        g[data_str][loja].append(it)
+    return g
 
-# Refresh manual
-c1, c2 = st.columns([1,6])
-with c1:
-    if st.button("🔄 Atualizar agora"):
-        st.cache_data.clear()
-        st.experimental_rerun()
-with c2:
-    st.caption("O painel usa cache de 60s para reduzir o delay. 'Atualizar agora' força o recarregamento.")
+def group_by_store(issues: list):
+    g = defaultdict(list)
+    for it in issues:
+        f = it.get("fields", {})
+        loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+        g[loja].append(it)
+    return g
 
-st.markdown("---")
+def detalhe(loja, issues):
+    return jira.agrupar_chamados(issues).get(loja, [])
 
-# ==================== Fetch =============================
-pendentes_raw = fetch_issues(JQL_PEND)
-agendados_raw = fetch_issues(JQL_AGEND)
-tec_raw       = fetch_issues(JQL_TEC)
+def _item_label(issue):
+    f = issue.get("fields", {})
+    loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+    return f"{issue.get('key','?')} | {loja}"
 
-agrup_pend  = agrupar(pendentes_raw)
-agrup_agend = agrupar(agendados_raw)
-agrup_tec   = agrupar(tec_raw)
+def _find_transition(issue_key: str, to_name_contains: str):
+    trans = jira.get_transitions(issue_key)
+    return next((t["id"] for t in trans if to_name_contains.lower() in t.get("to", {}).get("name", "").lower()), None)
 
-# ==================== Tabs ==============================
+# ===================== Kanban wrapper (compat) =====================
+def _sort_three_columns(col1_items, col2_items, col3_items, styles):
+    """
+    Funciona com várias versões do streamlit-sortables.
+    Sempre tenta usar multi_containers=True.
+    """
+    attempts = [
+        # novas assinaturas
+        {"items": [col1_items, col2_items, col3_items],
+         "multi_containers": True, "index": [0, 1, 2],
+         "direction": "vertical", "styles": styles, "key": "kanban"},
+        {"items": [col1_items, col2_items, col3_items],
+         "multi_containers": True, "index": [0, 1, 2],
+         "direction": "vertical", "key": "kanban"},
+        {"items": [col1_items, col2_items, col3_items],
+         "multi_containers": True, "key": "kanban"},
+        {"items": [col1_items, col2_items, col3_items],
+         "multi_containers": True},
+    ]
+    for params in attempts:
+        try:
+            return sort_items(**params)
+        except TypeError:
+            continue
+    # fallback ultra-antigo
+    try:
+        return sort_items([col1_items, col2_items, col3_items], True)
+    except Exception as e:
+        st.warning(f"Kanban indisponível nesta versão do streamlit-sortables: {e}")
+        return col1_items, col2_items, col3_items
+
+# ===================== UI helpers =====================
+def badge(text, tone="pending"):
+    colors = {
+        "pending":  ("#FFB84D", "#261A00"),
+        "scheduled":("#3DDC84", "#001A0E"),
+        "tec":      ("#4FC3F7", "#00131B"),
+    }
+    bg, fg = colors.get(tone, ("#444", "#000"))
+    return (
+        f"<span style='background:{bg};padding:4px 8px;border-radius:8px;"
+        f"font-weight:600;font-size:12px;color:{fg};'>{text}</span>"
+    )
+
+def pdv_counts(dets):
+    pdv = sum(1 for d in dets if str(d.get("pdv","")).strip() not in ("", "300"))
+    desktop = sum(1 for d in dets if (str(d.get("pdv","")) == "300") or ("desktop" in str(d.get("ativo","")).lower()))
+    return pdv, desktop
+
+# ===================== Page =====================
+st.title("Painel Field Service")
+
 tab1, tab2, tab3, tab4 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)"])
 
-def bloco_por_loja(status_nome: str, loja: str, detalhes: list):
-    if status_nome == "pendentes":
-        st.markdown(badge("PENDENTE", "pending"), unsafe_allow_html=True)
-    elif status_nome == "agendados":
-        st.markdown(badge("AGENDADO", "scheduled"), unsafe_allow_html=True)
-    else:
-        st.markdown(badge("TEC‑CAMPO", "tec"), unsafe_allow_html=True)
-    st.code(gerar_mensagem_whatsapp(loja, detalhes), language="text")
+with st.sidebar:
+    st.caption("Transição de Chamados")
+    st.button("↩️ Desfazer última ação", disabled=True)  # placeholder para manter layout
 
-# ----- PENDENTES
+# ---------- Dados ----------
+pendentes_raw = load_issues(JQLS["pend"], FIELDS)
+agendados_raw = load_issues(JQLS["agend"], FIELDS)
+teccampo_raw  = load_issues(JQLS["tec"], FIELDS)
+
+agrup_pend = group_by_store(pendentes_raw)
+grouped_sched = group_by_date_store(agendados_raw)
+agrup_tec = group_by_date_store(teccampo_raw)
+
+# ---------- PENDENTES ----------
 with tab1:
-    st.subheader(f"Chamados PENDENTES ({sum(len(v) for v in agrup_pend.values())})")
-    if not pendentes_raw:
+    st.subheader(f"Chamados PENDENTES ({sum(len(v) for v in agrup_pend.values())}) {badge('PENDENTE','pending')}", divider=True)
+    if not agrup_pend:
         st.info("Nenhum chamado em AGENDAMENTO.")
     else:
-        for loja, dets in sorted(agrup_pend.items()):
-            with st.expander(f"{loja} — {len(dets)} chamado(s)"):
-                bloco_por_loja("pendentes", loja, dets)
+        for loja, iss in sorted(agrup_pend.items()):
+            dets = detalhe(loja, iss)
+            dups = verificar_duplicidade(dets)
+            pdv, desk = pdv_counts(dets)
+            hdr = f"{loja} — {len(iss)} chamado(s) ({pdv} PDV · {desk} Desktop)"
+            with st.expander(hdr, expanded=False):
+                st.markdown("**FSAs:** " + ", ".join(d["key"] for d in dets))
+                st.code(
+                    gerar_mensagem_whatsapp(
+                        loja, dets, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL
+                    ),
+                    language="text",
+                )
+                if dups:
+                    st.warning("Possíveis duplicidades: " + ", ".join(f"{p}/{a}" for p,a in dups))
 
-# ----- AGENDADOS (com agrupamento por data no título)
+# ---------- AGENDADOS ----------
 with tab2:
-    st.subheader(f"Chamados AGENDADOS ({sum(len(v) for v in agrup_agend.values())})")
+    st.subheader(f"Chamados AGENDADOS ({len(agendados_raw)}) {badge('AGENDADO','scheduled')}", divider=True)
     if not agendados_raw:
         st.info("Nenhum chamado em AGENDADO.")
     else:
-        grupos_por_data = defaultdict(lambda: defaultdict(list))
-        for i in agendados_raw:
-            f = i["fields"]
-            loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-            raw  = f.get("customfield_12036")
-            data_str = "Sem data"
-            if raw:
-                try:
-                    y, m, d = raw[:10].split("-")
-                    data_str = f"{d}/{m}/{y}"
-                except Exception:
-                    pass
-            grupos_por_data[data_str][loja].append(i)
+        for date, stores in sorted(grouped_sched.items()):
+            total = sum(len(v) for v in stores.values())
+            st.markdown(f"### {date} — {total} chamado(s)")
+            for loja, iss in sorted(stores.items()):
+                dets = detalhe(loja, iss)
+                pdv, desk = pdv_counts(dets)
+                hdr = f"{loja} — {len(iss)} chamado(s) ({pdv} PDV · {desk} Desktop)"
+                with st.expander(hdr, expanded=False):
+                    st.markdown("**FSAs:** " + ", ".join(d["key"] for d in dets))
+                    st.code(
+                        gerar_mensagem_whatsapp(
+                            loja, dets, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL
+                        ),
+                        language="text",
+                    )
 
-        for data_str, lojas in sorted(grupos_por_data.items()):
-            total = sum(len(v) for v in lojas.values())
-            st.subheader(f"{data_str} — {total} chamado(s)")
-            for loja, iss in sorted(lojas.items()):
-                detalhes = agrupar(iss)[loja]
-                with st.expander(f"{loja} — {len(iss)} chamado(s)"):
-                    bloco_por_loja("agendados", loja, detalhes)
-
-# ----- TEC-CAMPO
+# ---------- TEC-CAMPO ----------
 with tab3:
-    st.subheader(f"Chamados TEC‑CAMPO ({sum(len(v) for v in agrup_tec.values())})")
-    if not tec_raw:
+    st.subheader(f"Chamados TEC‑CAMPO ({len(teccampo_raw)}) {badge('TEC-CAMPO','tec')}", divider=True)
+    if not teccampo_raw:
         st.info("Nenhum chamado em TEC‑CAMPO.")
     else:
-        for loja, dets in sorted(agrup_tec.items()):
-            with st.expander(f"{loja} — {len(dets)} chamado(s)"):
-                bloco_por_loja("tec", loja, dets)
+        for date, stores in sorted(agrup_tec.items()):
+            total = sum(len(v) for v in stores.values())
+            st.markdown(f"### {date} — {total} chamado(s)")
+            for loja, iss in sorted(stores.items()):
+                dets = detalhe(loja, iss)
+                pdv, desk = pdv_counts(dets)
+                hdr = f"{loja} — {len(iss)} chamado(s) ({pdv} PDV · {desk} Desktop)  {badge('TEC-CAMPO','tec')}"
+                with st.expander(hdr, expanded=False):
+                    st.markdown("**FSAs:** " + ", ".join(d["key"] for d in dets))
+                    st.code(
+                        gerar_mensagem_whatsapp(
+                            loja, dets, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL
+                        ),
+                        language="text",
+                    )
 
-# ----- KANBAN
+# ---------- KANBAN ----------
 with tab4:
-    st.subheader("Kanban por Loja (arraste os FSAs entre colunas para transicionar)")
-    st.caption("Arraste; ao finalizar abra 'Aplicar mudanças' para enviar as transições.")
+    st.subheader("Kanban por Loja (arraste os FSAs entre colunas para transicionar)", divider=True)
+    if not SORTABLES_AVAILABLE:
+        st.warning("Instale o pacote `streamlit-sortables` para habilitar o Kanban.")
+    else:
+        # 3 colunas: AGENDAMENTO / AGENDADO / TEC-CAMPO (apenas exibição e transição simples)
+        colA, colB, colC = st.columns(3)
+        with colA: st.markdown(badge("AGENDAMENTO", "pending"), unsafe_allow_html=True)
+        with colB: st.markdown(badge("AGENDADO", "scheduled"), unsafe_allow_html=True)
+        with colC: st.markdown(badge("TEC-CAMPO", "tec"), unsafe_allow_html=True)
 
-    def _fmt_items(issues):
-        out = []
-        for i in issues:
-            loja = i["fields"].get("customfield_14954", {}).get("value", "--")
-            out.append(f"{i['key']} | {loja}")
-        return out
+        col1_items = [_item_label(i) for i in pendentes_raw]
+        col2_items = [_item_label(i) for i in agendados_raw]
+        col3_items = [_item_label(i) for i in teccampo_raw]
 
-    col1_items = _fmt_items(pendentes_raw)
-    col2_items = _fmt_items(agendados_raw)
-    col3_items = _fmt_items(tec_raw)
+        styles = {
+            "container": {"background":"#0B0F14", "minHeight":"260px", "padding":"8px", "border":"1px solid #222", "borderRadius":"12px"},
+            "dragItem": {"background":"#121820", "border":"1px solid #222", "borderRadius":"8px", "padding":"6px 8px", "margin":"6px 0"},
+            "dragItemActive": {"background":"#1A2430"},
+            "dragItemGhost": {"opacity":"0.22"},
+        }
 
-    cols = st.columns(3)
-    with cols[0]: st.markdown(badge("AGENDAMENTO", "pending"),  unsafe_allow_html=True)
-    with cols[1]: st.markdown(badge("AGENDADO",    "scheduled"), unsafe_allow_html=True)
-    with cols[2]: st.markdown(badge("TEC‑CAMPO",   "tec"),       unsafe_allow_html=True)
+        new_col1, new_col2, new_col3 = _sort_three_columns(col1_items, col2_items, col3_items, styles)
 
-    styles = {
-        "container": {"background": "#0B0F14", "minHeight": "220px", "borderRadius": "10px"},
-        "item": {"background": "#121821", "border": "1px solid #223047", "padding": "8px 10px",
-                 "borderRadius": "8px", "margin": "6px 8px", "color": "#E6F0FF", "fontSize": "14px"},
-        "ghost": {"opacity": 0.3},
-    }
+        # Botão aplicar mudanças
+        if st.button("Aplicar mudanças", type="primary", use_container_width=True):
+            # Mapeia "KEY | LOJA" -> KEY
+            def keys_from(items):
+                out = []
+                for it in items:
+                    key = it.split("|", 1)[0].strip()
+                    out.append(key)
+                return out
 
-    # compatibilidade entre versões do streamlit-sortables
-    try:
-        result = sort_items([col1_items, col2_items, col3_items],
-                            index=[0, 1, 2], direction="vertical",
-                            styles=styles, key="kanban")
-    except TypeError:
-        try:
-            result = sort_items([col1_items, col2_items, col3_items],
-                                direction="vertical", styles=styles, key="kanban")
-        except TypeError:
-            result = sort_items([col1_items, col2_items, col3_items])
+            tgt1, tgt2, tgt3 = map(keys_from, (new_col1, new_col2, new_col3))
+            src1, src2, src3 = map(keys_from, (col1_items, col2_items, col3_items))
 
-    new_col1, new_col2, new_col3 = result
+            moved_to_agend  = set(tgt2) - set(src2)
+            moved_to_tec    = set(tgt3) - set(src3)
+            moved_to_pend   = set(tgt1) - set(src1)
 
-    def _keys(lst):  # "FSA-123 | Loja" -> "FSA-123"
-        return {x.split("|", 1)[0].strip() for x in lst}
+            errors = []
+            ok = 0
 
-    moved_to_agend = _keys(new_col2) - _keys(col2_items)
-    moved_to_tec   = _keys(new_col3) - _keys(col3_items)
+            # AGENDAMENTO -> AGENDADO
+            for key in moved_to_agend:
+                tid = _find_transition(key, "AGENDADO")
+                if tid:
+                    r = jira.transicionar_status(key, tid)
+                    ok += 1 if r.status_code == 204 else 0
+                else:
+                    errors.append(f"{key} sem transição para AGENDADO.")
 
-    if moved_to_agend or moved_to_tec:
-        with st.expander("⚙️ Aplicar mudanças"):
-            st.write("→ **AGENDADO**:", ", ".join(sorted(moved_to_agend)) or "—")
-            st.write("→ **TEC‑CAMPO**:", ", ".join(sorted(moved_to_tec)) or "—")
-            if st.button("Aplicar agora"):
-                ok = 0
-                # AGENDADO
-                for k in moved_to_agend:
-                    trans = jira.get_transitions(k)
-                    agid = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
-                    if agid and jira.transicionar_status(k, agid).status_code == 204:
-                        ok += 1
-                # TEC‑CAMPO
-                for k in moved_to_tec:
-                    trans = jira.get_transitions(k)
-                    tcid = next((t["id"] for t in trans if "tec-campo" in t.get("to", {}).get("name", "").lower()), None)
-                    if tcid and jira.transicionar_status(k, tcid).status_code == 204:
-                        ok += 1
-                st.success(f"Transições aplicadas: {ok}")
-                st.cache_data.clear()
-                st.experimental_rerun()
+            # qualquer -> TEC-CAMPO
+            for key in moved_to_tec:
+                tid = _find_transition(key, "TEC-CAMPO")
+                if tid:
+                    r = jira.transicionar_status(key, tid)
+                    ok += 1 if r.status_code == 204 else 0
+                else:
+                    errors.append(f"{key} sem transição para TEC-CAMPO.")
 
-st.markdown("---")
-st.caption("Cache 60s • Menos chamadas ao Jira • Use 'Atualizar agora' se precisar forçar um refresh.")
+            # qualquer -> AGENDAMENTO
+            for key in moved_to_pend:
+                tid = _find_transition(key, "AGENDAMENTO")
+                if tid:
+                    r = jira.transicionar_status(key, tid)
+                    ok += 1 if r.status_code == 204 else 0
+                else:
+                    errors.append(f"{key} sem transição para AGENDAMENTO.")
+
+            if errors:
+                st.error("Algumas transições falharam:")
+                for e in errors:
+                    st.code(e)
+            st.success(f"{ok} transições aplicadas.")
+            st.cache_data.clear()
+
+st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
