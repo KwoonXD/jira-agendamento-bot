@@ -1,10 +1,11 @@
 streamlit
 streamlit-autorefresh
-requests
 pytz
 plotly
 streamlit-authenticator>=0.2.4
 pyyaml
 fpdf
+streamlit==1.48.0
+requests
 streamlit-sortables==0.3.1
 
