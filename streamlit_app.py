@@ -1,7 +1,7 @@
+# streamlit_app.py
 # -*- coding: utf-8 -*-
 import os
 from datetime import datetime
-from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import streamlit as st
@@ -9,23 +9,29 @@ import streamlit as st
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade, ISO_DESKTOP_URL, ISO_PDV_URL, RAT_URL
 
+# ====== tenta importar streamlit-sortables (diferentes versões) ======
+sort_items_v031 = None
+sort_items_legacy = None
 try:
-    from streamlit_sortables import sort_items as sort_items_v031  # >=0.3
+    from streamlit_sortables import sort_items as _sort_items_candidate
+    sort_items_v031 = _sort_items_candidate  # pode ser 0.3.x ou outra
 except Exception:
-    sort_items_v031 = None
-try:
-    from streamlit_sortables import sort_items as sort_items_legacy
-except Exception:
-    sort_items_legacy = None
+    pass
+if sort_items_v031 is None:
+    try:
+        from streamlit_sortables import sort_items as _sort_items_legacy
+        sort_items_legacy = _sort_items_legacy  # fallback extra
+    except Exception:
+        pass
 
 st.set_page_config(page_title="Painel Field Service", layout="wide", page_icon="📱")
 
+# ====== tema / badges ======
 BADGES = {
-    "PENDENTE": {"bg": "#FFB84D", "fg": "#261A00"},
-    "AGENDADO": {"bg": "#45D19F", "fg": "#00130D"},
+    "PENDENTE":  {"bg": "#FFB84D", "fg": "#261A00"},
+    "AGENDADO":  {"bg": "#45D19F", "fg": "#00130D"},
     "TEC-CAMPO": {"bg": "#DCF3FF", "fg": "#00131B"},
 }
-
 def badge(texto: str) -> str:
     b = BADGES.get(texto.upper(), {"bg": "#EEE", "fg": "#111"})
     return f"<span style='background:{b['bg']};padding:4px 8px;border-radius:8px;font-weight:600;font-size:12px;color:{b['fg']};'>{texto}</span>"
@@ -57,16 +63,6 @@ def _carregar_raw() -> Dict[str, list]:
 def _is_desktop(pdv, ativo) -> bool:
     pdv_str, ativo_str = str(pdv or "").strip(), str(ativo or "").lower()
     return pdv_str == "300" or "desktop" in ativo_str
-
-def _parse_dt(raw):
-    if not raw:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            return datetime.strptime(raw, fmt)
-        except Exception:
-            pass
-    return None
 
 def _agrupar_por_loja(issues: list) -> Dict[str, list]:
     return jira.agrupar_chamados(issues)
@@ -103,19 +99,75 @@ def _expander_titulo(loja: str, detalhes: list) -> str:
     q_pdv, q_desktop = _contar_pdv_desktop(detalhes)
     return f"{loja} — {qtd} chamado(s) ({q_pdv} PDV · {q_desktop} Desktop)"
 
+# ============== KANBAN helpers (compat de versões) ==================
 def _kanban_items(keys: List[str]) -> List[dict]:
+    # formato 0.3.x: lista de dicts
     return [{"header": k, "index": k} for k in keys]
 
-def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], styles: dict):
-    items = [_kanban_items(col1), _kanban_items(col2), _kanban_items(col3)]
-    if sort_items_v031:
-        return sort_items_v031(items, multi_containers=True, direction="vertical", styles=styles, key="kanban")
-    if sort_items_legacy:
-        res = sort_items_legacy([col1, col2, col3])
-        if isinstance(res, (list, tuple)) and len(res) == 3:
-            return list(res)
-    return [col1, col2, col3]
+def _plain_from_struct(items: List[dict]) -> List[str]:
+    return [it.get("header") or it.get("index") or "" for it in items]
 
+def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], styles: dict):
+    """
+    Tenta várias assinaturas:
+      1) sort_items(items: list[list[dict]], multi_containers=True, direction='vertical', styles=..., key=...)
+      2) sort_items(items: list[list[dict]], multi_containers=True, direction='vertical', key=...)
+      3) sort_items(items: list[list[str]])  # legado
+    Sempre retorna (list[str], list[str], list[str])
+    """
+    # 0.3.x (multi containers) – estrutura de dicts
+    items_struct = [_kanban_items(col1), _kanban_items(col2), _kanban_items(col3)]
+
+    if sort_items_v031:
+        # tenta com styles
+        try:
+            res = sort_items_v031(
+                items_struct,
+                multi_containers=True,
+                direction="vertical",
+                styles=styles,
+                key="kanban",
+            )
+            if isinstance(res, (list, tuple)) and len(res) == 3:
+                a, b, c = res
+                return _plain_from_struct(a), _plain_from_struct(b), _plain_from_struct(c)
+        except TypeError:
+            pass
+        # tenta sem styles
+        try:
+            res = sort_items_v031(
+                items_struct,
+                multi_containers=True,
+                direction="vertical",
+                key="kanban",
+            )
+            if isinstance(res, (list, tuple)) and len(res) == 3:
+                a, b, c = res
+                return _plain_from_struct(a), _plain_from_struct(b), _plain_from_struct(c)
+        except TypeError:
+            pass
+        # última tentativa: API antiga esperando listas simples
+        try:
+            res = sort_items_v031([col1, col2, col3])
+            if isinstance(res, (list, tuple)) and len(res) == 3:
+                a, b, c = res
+                return list(a), list(b), list(c)
+        except Exception:
+            pass
+
+    if sort_items_legacy:
+        try:
+            res = sort_items_legacy([col1, col2, col3])
+            if isinstance(res, (list, tuple)) and len(res) == 3:
+                a, b, c = res
+                return list(a), list(b), list(c)
+        except Exception:
+            pass
+
+    # fallback: não mudou nada
+    return col1, col2, col3
+
+# ====== session / topo ======
 if "mudancas_pendentes" not in st.session_state:
     st.session_state.mudancas_pendentes = {}
 if "last_refresh" not in st.session_state:
@@ -126,18 +178,21 @@ with top_cols[0]:
     if st.button("🔄 Atualizar agora"):
         st.cache_data.clear()
         st.session_state.last_refresh = datetime.now()
-        (getattr(st, "rerun", getattr(st, "experimental_rerun")))()
+        (getattr(st, "rerun", getattr(st, "experimental_rerun", lambda: None)))()
 with top_cols[1]:
     st.caption(f"Último refresh: {st.session_state.last_refresh or '—'}")
 
+# ====== carrega dados ======
 raw = _carregar_raw()
 grp_pend = _agrupar_por_loja(raw["pend"])
 grp_agnd = _agrupar_por_loja(raw["agend"])
 grp_tec  = _agrupar_por_loja(raw["tec"])
 
+# ====== sidebar filtro global ======
 with st.sidebar:
     filtro_global = st.text_input("Filtro global (FSA, Loja, PDV, Ativo…)", "").strip()
 
+# ====== bloco reutilizável ======
 def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
     colf1, colf2, colf3 = st.columns([0.4, 0.3, 0.3])
     with colf1:
@@ -161,6 +216,7 @@ def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
     st.markdown("**FSAs:** " + (", ".join(d["key"] for d in detalhes) if detalhes else "_Nenhum FSA._"))
     st.code(gerar_mensagem(loja, detalhes), language="text")
 
+# ====== TABS ======
 tab1, tab2, tab3, tab4 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)"])
 
 with tab1:
@@ -195,6 +251,7 @@ with tab3:
 
 with tab4:
     st.markdown("Dica: arraste; ao finalizar, clique em **Aplicar mudanças**.")
+
     def keys_por_loja(grupo: Dict[str, list]) -> List[str]:
         out = []
         for loja, dets in grupo.items():
@@ -213,14 +270,10 @@ with tab4:
 
     styles = {
         "container": {"background": "#0B0F14", "minHeight": "280px"},
-        "item": {"background": "#F15B5B", "padding": "10px", "margin": "8px", "borderRadius": "8px"},
+        "item": {"background": "#0D3B66", "padding": "10px", "margin": "8px", "borderRadius": "8px", "color":"#fff"},
     }
 
-    result = _sort_three_columns(col1_items, col2_items, col3_items, styles)
-    if isinstance(result, list) and len(result) == 3:
-        new_col1, new_col2, new_col3 = result
-    else:
-        new_col1, new_col2, new_col3 = col1_items, col2_items, col3_items
+    new_col1, new_col2, new_col3 = _sort_three_columns(col1_items, col2_items, col3_items, styles)
 
     def _col_of(item: str, c1, c2, c3) -> str:
         if item in c1: return "AGENDAMENTO"
@@ -250,7 +303,10 @@ with tab4:
         for issue_key, novo_status in pendentes.items():
             try:
                 trans = jira.get_transitions(issue_key)
-                tid = next((t["id"] for t in trans if (t.get("to", {}) or {}).get("name", "").upper() == novo_status.upper()), None)
+                tid = next(
+                    (t["id"] for t in trans if (t.get("to", {}) or {}).get("name", "").upper() == novo_status.upper()),
+                    None
+                )
                 if not tid:
                     falhas.append(f"{issue_key}: transição para '{novo_status}' não disponível")
                     continue
@@ -268,7 +324,7 @@ with tab4:
             st.code("\n".join(falhas))
 
         st.cache_data.clear()
-        (getattr(st, "rerun", getattr(st, "experimental_rerun")))()
+        (getattr(st, "rerun", getattr(st, "experimental_rerun", lambda: None)))()
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
