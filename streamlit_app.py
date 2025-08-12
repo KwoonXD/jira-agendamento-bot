@@ -110,14 +110,6 @@ def _expander_titulo(loja: str, detalhes: list) -> str:
 
 # ============== KANBAN helpers (compat de versões) ==================
 def _containers_payload(col1: List[str], col2: List[str], col3: List[str]) -> List[Dict]:
-    """
-    Formato que o streamlit-sortables (multi_containers=True) espera:
-    [
-      {'header': 'AGENDAMENTO', 'items': [...]},
-      {'header': 'AGENDADO',    'items': [...]},
-      {'header': 'TEC-CAMPO',   'items': [...]},
-    ]
-    """
     return [
         {"header": "AGENDAMENTO", "items": col1},
         {"header": "AGENDADO",    "items": col2},
@@ -133,17 +125,9 @@ def _extract_items_from_containers(sorted_payload: List[Dict]) -> Tuple[List[str
     return a, b, c
 
 def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], styles: dict):
-    """
-    Tenta as diferentes assinaturas do componente:
-      1) sort_items(payload_multi, multi_containers=True, direction='vertical', styles=..., key=...)
-      2) sort_items(payload_multi, multi_containers=True, direction='vertical', key=...)
-      3) sort_items([col1, col2, col3])  # legado (uma versão bem antiga)
-    Retorna sempre (list[str], list[str], list[str]).
-    """
     payload_multi = _containers_payload(col1, col2, col3)
 
     if sort_items_v031:
-        # tenta com styles
         try:
             res = sort_items_v031(
                 payload_multi,
@@ -157,7 +141,6 @@ def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], style
                 return a, b, c
         except TypeError:
             pass
-        # tenta sem styles
         try:
             res = sort_items_v031(
                 payload_multi,
@@ -170,7 +153,6 @@ def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], style
                 return a, b, c
         except TypeError:
             pass
-        # fallback bem antigo: listas simples
         try:
             res = sort_items_v031([col1, col2, col3])
             if isinstance(res, (list, tuple)) and len(res) == 3:
@@ -186,7 +168,6 @@ def _sort_three_columns(col1: List[str], col2: List[str], col3: List[str], style
         except Exception:
             pass
 
-    # Nada deu: devolve original
     return col1, col2, col3
 
 # ====== session / topo ======
@@ -227,7 +208,6 @@ def bloco_por_loja(status_nome: str, loja: str, detalhes_raw: list):
     with colf3:
         only_desk = st.toggle("Somente Desktop", value=False, key=f"desk-{status_nome}-{loja}")
 
-    # aplica filtro global + local
     detalhes = detalhes_raw
     if filtro_global:
         detalhes = _search_filter(filtro_global, detalhes)
@@ -250,8 +230,26 @@ def _render_grupo(titulo: str, status_nome: str, grupo: Dict[str, list], tab_key
         with st.expander(_expander_titulo(loja, detalhes), expanded=False):
             bloco_por_loja(tab_key, loja, detalhes)
 
+# ====== Utils flatten (para Lote e Kanban) ======
+def _flat(grupo: Dict[str, list], status_nome: str) -> List[Dict]:
+    out = []
+    for loja, dets in grupo.items():
+        for d in dets:
+            out.append({
+                "key": d.get("key"),
+                "loja": loja,
+                "pdv": d.get("pdv"),
+                "ativo": d.get("ativo"),
+                "problema": d.get("problema"),
+                "status": status_nome,
+                "is_desktop": _is_desktop(d.get("pdv"), d.get("ativo")),
+            })
+    return out
+
 # ====== TABS ======
-tab1, tab2, tab3, tab4 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)", "TRANSIÇÃO EM LOTE"]
+)
 
 with tab1:
     _render_grupo("Chamados PENDENTES", "PENDENTE", grp_pend, "pendentes")
@@ -262,6 +260,7 @@ with tab2:
 with tab3:
     _render_grupo("Chamados TEC‑CAMPO", "TEC-CAMPO", grp_tec, "tec")
 
+# ====================== KANBAN ======================
 with tab4:
     st.markdown("Dica: arraste; ao finalizar, clique em **Aplicar mudanças**.")
 
@@ -339,6 +338,129 @@ with tab4:
 
         st.cache_data.clear()
         (getattr(st, "rerun", getattr(st, "experimental_rerun", lambda: None)))()
+
+# ================== TRANSIÇÃO EM LOTE ==================
+with tab5:
+    st.subheader("Transição em Lote")
+
+    # Fonte (status origem)
+    status_origem = st.radio(
+        "Origem",
+        ["PENDENTE", "AGENDADO", "TEC-CAMPO", "TODOS"],
+        horizontal=True,
+        index=3,
+    )
+
+    # Monta lista base
+    base = []
+    if status_origem in ("PENDENTE", "TODOS"):
+        base += _flat(grp_pend, "PENDENTE")
+    if status_origem in ("AGENDADO", "TODOS"):
+        base += _flat(grp_agnd, "AGENDADO")
+    if status_origem in ("TEC-CAMPO", "TODOS"):
+        base += _flat(grp_tec,  "TEC-CAMPO")
+
+    # Filtros
+    lojas_disponiveis = sorted({r["loja"] for r in base})
+    colf1, colf2, colf3, colf4 = st.columns([0.25, 0.25, 0.25, 0.25])
+    with colf1:
+        loja_sel = st.selectbox("Filtrar loja", ["(todas)"] + lojas_disponiveis)
+    with colf2:
+        filtro_txt = st.text_input("Buscar (FSA, ativo, problema, PDV…)", "")
+    with colf3:
+        only_pdv = st.toggle("Somente PDV", value=False)
+    with colf4:
+        only_desktop = st.toggle("Somente Desktop", value=False)
+
+    # Aplica filtros
+    filtrados = base
+    if loja_sel != "(todas)":
+        filtrados = [r for r in filtrados if r["loja"] == loja_sel]
+    if filtro_txt.strip():
+        c = filtro_txt.lower().strip()
+        tmp = []
+        for r in filtrados:
+            blob = " ".join(str(v) for v in r.values()).lower()
+            if c in blob:
+                tmp.append(r)
+        filtrados = tmp
+    if only_pdv:
+        filtrados = [r for r in filtrados if not r["is_desktop"]]
+    if only_desktop:
+        filtrados = [r for r in filtrados if r["is_desktop"]]
+
+    # Tabela com seleção
+    import pandas as pd
+    df = pd.DataFrame(filtrados, columns=["key", "loja", "status", "pdv", "ativo", "problema", "is_desktop"])
+    if df.empty:
+        st.info("Nenhum chamado para os filtros selecionados.")
+    else:
+        df = df.rename(columns={"key": "FSA", "loja": "Loja", "status": "Status", "pdv": "PDV", "ativo": "Ativo",
+                                "problema": "Problema", "is_desktop": "Desktop"})
+        df.insert(0, "Selecionar", False)
+
+        # Data editor
+        edited = st.data_editor(
+            df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Selecionar": st.column_config.CheckboxColumn(required=False, default=False),
+                "Desktop": st.column_config.CheckboxColumn(disabled=True),
+            },
+            key="lote_editor",
+        )
+
+        # Selecionar todos
+        colb1, colb2 = st.columns([0.25, 0.75])
+        with colb1:
+            if st.button("Marcar todos (filtrados)"):
+                edited["Selecionar"] = True
+                st.session_state["lote_editor"] = edited  # atualiza a tabela
+                st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
+
+        # Escolhe destino
+        destino = st.selectbox("Mover selecionados para:", ["AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
+
+        # Filtra selecionados e remove os que já estão no destino
+        selecionados = edited[edited["Selecionar"] == True]  # noqa: E712
+        if not selecionados.empty:
+            candidatos = selecionados[selecionados["Status"].str.upper() != destino.upper()]
+        else:
+            candidatos = selecionados
+
+        n = len(candidatos)
+        st.caption(f"{len(selecionados)} selecionado(s); {n} com status diferente do destino.")
+
+        # Botão aplicar
+        if st.button(f"Aplicar transição em lote ({n})", type="primary", disabled=(n == 0)):
+            ok, falhas = 0, []
+            for _, row in candidatos.iterrows():
+                issue_key = row["FSA"]
+                try:
+                    trans = jira.get_transitions(issue_key)
+                    tid = next(
+                        (t["id"] for t in trans if (t.get("to", {}) or {}).get("name", "").upper() == destino.upper()),
+                        None
+                    )
+                    if not tid:
+                        falhas.append(f"{issue_key}: transição para '{destino}' não disponível")
+                        continue
+                    r = jira.transicionar_status(issue_key, tid)
+                    if r.status_code == 204:
+                        ok += 1
+                    else:
+                        falhas.append(f"{issue_key}: HTTP {r.status_code}")
+                except Exception as e:
+                    falhas.append(f"{issue_key}: {e}")
+
+            if ok: st.success(f"{ok} chamado(s) atualizado(s).")
+            if falhas:
+                st.error("Algumas falharam:")
+                st.code("\n".join(falhas))
+
+            st.cache_data.clear()
+            st.rerun()
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
