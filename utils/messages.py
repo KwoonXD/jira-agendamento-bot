@@ -1,69 +1,81 @@
+# utils/messages.py
 from datetime import datetime
 
-def _classificar_tipo(ch: dict) -> str:
-    pdv = str(ch.get("pdv", "")).strip()
-    ativo = str(ch.get("ativo", "")).lower()
-    if pdv == "300" or "desktop" in ativo:
-        return "Desktop"
-    return "PDV"
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
-def gerar_mensagem_whatsapp(
-    loja: str,
-    chamados: list[dict],
-    iso_desktop_url: str | None = None,
-    iso_pdv_url: str | None = None,
-    rat_url: str | None = None,
-) -> str:
-    if not chamados:
-        return "—"
 
-    linhas_total: list[str] = []
+def _is_desktop(ch: dict) -> bool:
+    """Desktop se PDV == 300 ou se 'desktop' aparecer no ATIVO."""
+    try:
+        pdv = str(ch.get("pdv", "")).strip()
+        ativo = str(ch.get("ativo", "")).lower()
+        return pdv == "300" or "desktop" in ativo
+    except Exception:
+        return False
+
+
+def _fmt_line_link(label: str, url: str) -> str:
+    # formato já bom pra colar no WhatsApp (exibe como link clicável)
+    return f"{label}: {url}"
+
+
+def gerar_mensagem_whatsapp(loja: str, chamados: list) -> str:
+    """
+    Mensagem por loja no formato solicitado (sem data agendada no corpo do chamado)
+    e com a ISO dentro do bloco '⚠️ É OBRIGATÓRIO LEVAR', seguida da RAT.
+    """
+    blocos = []
     endereco_info = None
-    tem_desktop = False
-    tem_pdv = False
+    algum_desktop = False
 
     for ch in chamados:
-        tipo = _classificar_tipo(ch)
-        if tipo == "Desktop": tem_desktop = True
-        else: tem_pdv = True
+        is_desktop = _is_desktop(ch)
+        if is_desktop:
+            algum_desktop = True
 
-        linhas_total.extend([
-            f"{ch.get('key','--')}",
-            f"Loja {loja}",
-            f"PDV:{ch.get('pdv','--')}",
-            f"ATIVO:{str(ch.get('ativo','--')).replace(' ', '')}",
-            f"Problema:{ch.get('problema','--')}",
+        linhas = [
+            f"*{ch.get('key','--')}*",
+            f"Loja: {loja}",
+            f"Status: {ch.get('status','--')}",
+            f"PDV: {ch.get('pdv','--')}",
+            f"*ATIVO:* {ch.get('ativo','--')}",
+            f"Tipo de atendimento: {'Desktop' if is_desktop else 'PDV'}",
+            f"Problema: {ch.get('problema','--')}",
             "***"
-        ])
+        ]
+        blocos.append("\n".join(linhas))
 
+        # guardo 1x o endereço (o último sobrescreve, o que é OK: todos da loja são iguais)
         endereco_info = (
             ch.get('endereco','--'),
             ch.get('estado','--'),
             ch.get('cep','--'),
-            ch.get('cidade','--'),
+            ch.get('cidade','--')
         )
 
+    # bloco de endereço
     if endereco_info:
-        linhas_total.extend([
-            "",
-            f"Endereço: {endereco_info[0]}",
-            f"Estado: {endereco_info[1]}",
-            f"CEP: {endereco_info[2]}",
-            f"Cidade: {endereco_info[3]}",
-            "",
-            "---------",
-            "⚠️ *É OBRIGATÓRIO LEVAR:*"
-        ])
-        if tem_desktop and iso_desktop_url:
-            linhas_total.append(f"• 🔧 ISO do Desktop({iso_desktop_url})")
-        if tem_pdv and iso_pdv_url:
-            linhas_total.append(f"• 🔧 ISO do PDV({iso_pdv_url})")
-        if rat_url:
-            linhas_total.append(f"• 📄 RAT({rat_url})")
+        blocos.append(
+            "\n".join([
+                f"Endereço: {endereco_info[0]}",
+                f"Estado: {endereco_info[1]}",
+                f"CEP: {endereco_info[2]}",
+                f"Cidade: {endereco_info[3]}",
+                "------",
+                "⚠️ *É OBRIGATÓRIO LEVAR:*",
+                # ISO (PDV ou Desktop) fica AQUI
+                _fmt_line_link("• ISO do Desktop" if algum_desktop else "• ISO do PDV",
+                               ISO_DESKTOP_URL if algum_desktop else ISO_PDV_URL),
+                _fmt_line_link("• RAT", RAT_URL)
+            ])
+        )
 
-    return "\n".join(linhas_total)
+    return "\n\n".join(blocos)
 
-def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
+
+def verificar_duplicidade(chamados):
     seen = {}
     duplicates = set()
     for ch in chamados:
