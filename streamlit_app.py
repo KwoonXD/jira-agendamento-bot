@@ -4,283 +4,224 @@ from datetime import datetime
 from collections import defaultdict
 from itertools import chain
 
+# streamlit_app.py
 import streamlit as st
-
-# ====== Drag & Drop (Kanban) ======
-try:
-    from streamlit_sortables import sort_items
-    HAS_SORTABLES = True
-except Exception:
-    HAS_SORTABLES = False
-
+from collections import defaultdict
 from utils.jira_api import JiraAPI
-from utils.messages import verificar_duplicidade
+from utils.messages import gerar_mensagem_whatsapp, verificar_duplicidade
+from streamlit_sortables import sort_items
 
-# ========= PAGE / THEME =========
+# ── Config ─────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 
-# CSS alinhado ao tema do config.toml
-st.markdown("""
-<style>
-:root {
-  --pill-bg:#141A22; --pill-muted:#10151d; --text:#E6EDF3; --muted:#9aa4b2;
-  --yellow:#FFB454; --green:#2ECC71; --blue:#3AA0FF; --info:#728097;
-}
+# Paleta/coerência com tema Streamlit Dark
+def badge(text, kind="pending"):
+    colors = {
+        "pending":  ("#FFB84D", "🟧"),
+        "scheduled":("#31D0AA", "🟩"),
+        "tec":      ("#2DA1FF", "🟦"),
+    }
+    bg, _ = colors.get(kind, ("#444", "⬛"))
+    return (
+        f'<span style="background:{bg}33; padding:4px 10px; '
+        f'border-radius:10px; font-weight:700; font-size:12px; '
+        f'border:1px solid {bg}; color:#fff;">{text}</span>'
+    )
 
-.badge{display:inline-flex;align-items:center;gap:8px;background:#1a212c;
-  color:#dbe3ea;font-size:12px;font-weight:700;border-radius:999px;padding:6px 10px;margin-left:8px;}
-.badge .dot{width:10px;height:10px;border-radius:3px;display:inline-block;}
-.badge.pending .dot{background:#FFB454;}
-.badge.scheduled .dot{background:#2ECC71;}
-.badge.tec .dot{background:#3AA0FF;}
-.badge.info .dot{background:#728097;}
+st.title("📱 Painel Field Service")
 
-.group-title{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;}
-.codebox{background:#0B0F14;border:1px solid #1f2a39;border-radius:12px;padding:12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;white-space:pre-wrap;line-height:1.35;}
-.head-pill{background:#10151d;border:1px solid #2a3342;padding:10px 14px;border-radius:12px;}
-.kicker{color:#9aa4b2;font-size:12px}
-</style>
-""", unsafe_allow_html=True)
+# ── Jira client ────────────────────────────────────────────────────────────
+jira = JiraAPI(
+    st.secrets["EMAIL"],
+    st.secrets["API_TOKEN"],
+    st.secrets.get("JIRA_URL", "https://delfia.atlassian.net"),
+)
 
-# ========= LINKS =========
-ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
-ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
-RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
-
-# ========= HELPERS =========
-def parse_dt(raw):
-    if not raw: return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try: return datetime.strptime(raw, fmt)
-        except Exception: pass
-    return None
-
-def is_desktop(pdv_val, ativo_val):
-    try:
-        if str(pdv_val).strip() == "300": return True
-    except Exception: pass
-    return "desktop" in str(ativo_val or "").lower()
-
-def badge(label, kind="info"):
-    return f'<span class="badge {kind}"><span class="dot"></span>{label}</span>'
-
-def header_badges(qtd, qtd_pdv, qtd_desktop, tem_dup=False):
-    items = [badge(f"{qtd_pdv} PDV", "info"), badge(f"{qtd_desktop} Desktop", "info")]
-    if tem_dup: items.append(badge("Possíveis Duplicados", "pending"))
-    return " ".join(items)
-
-def format_whatsapp_block(loja, chs):
-    lines=[]
-    for ch in chs:
-        pdv, ativo = ch.get("pdv","--"), ch.get("ativo","--")
-        tipo = "Desktop" if is_desktop(pdv, ativo) else "PDV"
-        problema = ch.get("problema","--")
-        lines += [
-            f"*{ch.get('key','--')}*",
-            f"Loja: {loja}",
-            f"Status: {ch.get('status','--')}",
-            f"PDV: {pdv}",
-            f"*ATIVO:* {ativo}",
-            f"Tipo de atendimento: {tipo}",
-            f"Problema: {problema}, Self Checkout?: Não",
-            "***"
-        ]
-    if chs:
-        a = chs[0]
-        lines += [
-            f"Endereço: {a.get('endereco','--')}",
-            f"Estado: {a.get('estado','--')}",
-            f"CEP: {a.get('cep','--')}",
-            f"Cidade: {a.get('cidade','--')}",
-        ]
-        qtd_pdv = sum(1 for x in chs if not is_desktop(x.get('pdv'), x.get('ativo')))
-        qtd_dsk = len(chs) - qtd_pdv
-        iso_link = ISO_PDV_URL if qtd_pdv >= qtd_dsk else ISO_DESKTOP_URL
-        lines += [
-            f"ISO ({'PDV' if qtd_pdv >= qtd_dsk else 'Desktop'}): {iso_link}",
-            "------",
-            f"⚠️ *É OBRIGATÓRIO LEVAR:*",
-            f"• RAT: {RAT_URL}"
-        ]
-    return "\n".join(lines)
-
-def agrupar_por_loja(issues):
-    agrup=defaultdict(list)
-    for issue in issues:
-        f=issue.get("fields",{})
-        loja=f.get("customfield_14954",{}).get("value","Loja Desconhecida")
-        agrup[loja].append({
-            "key": issue.get("key"),
-            "status": f.get("status",{}).get("name","--"),
-            "pdv": f.get("customfield_14829","--"),
-            "ativo": f.get("customfield_14825",{}).get("value","--"),
-            "problema": f.get("customfield_12374","--"),
-            "endereco": f.get("customfield_12271","--"),
-            "estado": f.get("customfield_11948",{}).get("value","--"),
-            "cep": f.get("customfield_11993","--"),
-            "cidade": f.get("customfield_11994","--"),
-            "data_agendada": f.get("customfield_12036")
-        })
-    return agrup
-
-def group_title_with_badge(base, status_name):
-    cls={"AGENDAMENTO":"pending","AGENDADO":"scheduled","TEC-CAMPO":"tec"}.get(status_name.upper(),"info")
-    return f'<div class="group-title"><span>{base}</span>{badge(status_name,cls)}</div>'
-
-def count_pdv_desktop(dets):
-    qtd_pdv = sum(1 for d in dets if not is_desktop(d.get("pdv"), d.get("ativo")))
-    return qtd_pdv, len(dets)-qtd_pdv
-
-# ========= JIRA / CACHE =========
-jira = JiraAPI(st.secrets["EMAIL"], st.secrets["API_TOKEN"], "https://delfia.atlassian.net")
-
+# Campos a buscar no Jira
 FIELDS = (
-    "summary,status,customfield_14954,customfield_14829,customfield_14825,"
-    "customfield_12374,customfield_12271,customfield_11993,"
-    "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
+    "summary,customfield_14954,customfield_14829,customfield_14825,"
+    "customfield_12374,customfield_12271,customfield_11993,customfield_11994,"
+    "customfield_11948,customfield_12036,status"
 )
 
-@st.cache_data(ttl=45, show_spinner=False)
-def buscar_cached(jql: str, fields: str):
-    return jira.buscar_chamados(jql, fields)
-
-def refresh():
-    buscar_cached.clear()
-    st.session_state["last_pull"] = datetime.now()
-    st.rerun()
-
-JQLS = {
-    "pend":  'project = FSA AND status = "AGENDAMENTO"',
-    "agend": 'project = FSA AND status = "AGENDADO"',
-    "tec":   'project = FSA AND status = "TEC-CAMPO"'
-}
-
-# ========= SIDEBAR (form minimiza rerun) =========
-with st.sidebar:
-    st.header("Ações")
-    if st.button("🔄 Atualizar agora"): refresh()
-    st.caption("Cache: 45s. Evita bater no Jira a cada interação.")
-
-    st.markdown("---")
-    st.header("Filtros")
-    with st.form("form_filtros"):
-        filtro_txt = st.text_input("Filtro global", value=st.session_state.get("flt",""))
-        loja_escolhida = st.text_input("Filtrar por Loja", value=st.session_state.get("loja",""))
-        if st.form_submit_button("Aplicar filtros"):
-            st.session_state["flt"] = filtro_txt
-            st.session_state["loja"] = loja_escolhida
-            st.rerun()
-
-# ========= FETCH (único ponto de rede) =========
-with st.spinner("Carregando dados do Jira..."):
-    pend_raw = buscar_cached(JQLS["pend"], FIELDS)
-    agnd_raw = buscar_cached(JQLS["agend"], FIELDS)
-    tec_raw  = buscar_cached(JQLS["tec"], FIELDS)
-
-pend = agrupar_por_loja(pend_raw)
-agnd = agrupar_por_loja(agnd_raw)
-tec  = agrupar_por_loja(tec_raw)
-
-# ========= HEADER =========
-st.markdown(
-    f"""<div class="head-pill">
-        <strong>📱 Painel Field Service</strong>
-        {badge("PENDENTE","pending")}{badge("AGENDADO","scheduled")}{badge("TEC-CAMPO","tec")}
-        <span class="kicker">Último pull: {st.session_state.get('last_pull', datetime.now()):%d/%m %H:%M:%S}</span>
-    </div>""",
-    unsafe_allow_html=True
-)
-
-tab1, tab2, tab3, tab4 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN"])
-
-# ========= RENDER FRAGMENTOS (evita rerender desnecessário) =========
-@st.fragment  # streamlit>=1.28
-def render_lista_por_loja(status_nome, agrup):
-    if not agrup:
-        st.info(f"Nenhum chamado em {status_nome}.")
-        return
-    def get_data_str(it):
-        dt = parse_dt(it.get("data_agendada"))
-        return dt.strftime("%d/%m/%Y") if dt else "Sem Data"
-
-    # PENDENTES: sem data
-    if status_nome == "AGENDAMENTO":
-        for loja in sorted(agrup):
-            det = agrup[loja]
-            if st.session_state.get("loja") and st.session_state["loja"] not in str(loja): continue
-            if st.session_state.get("flt"):
-                det = [d for d in det if st.session_state["flt"].lower() in json.dumps(d, ensure_ascii=False).lower()]
-            qtd_pdv,qtd_dsk = count_pdv_desktop(det)
-            header = group_title_with_badge(f"{loja} — {len(det)} chamado(s)", "PENDENTE")
-            with st.expander(f"{loja} — {len(det)} chamado(s)", expanded=False):
-                st.markdown(header, unsafe_allow_html=True)
-                st.caption(header_badges(len(det), qtd_pdv, qtd_dsk))
-                st.markdown(f"<div class='codebox'>{format_whatsapp_block(loja, det)}</div>", unsafe_allow_html=True)
-        return
-
-    # AGENDADO / TEC‑CAMPO: por data
-    grouped = defaultdict(lambda: defaultdict(list))
-    for loja, items in agrup.items():
-        for it in items:
-            grouped[get_data_str(it)][loja].append(it)
-
-    for data_str, lojas in sorted(grouped.items()):
-        total = sum(len(v) for v in lojas.values())
-        st.subheader(f"{data_str} — {total} chamado(s)")
-        for loja in sorted(lojas):
-            det = lojas[loja]
-            if st.session_state.get("loja") and st.session_state["loja"] not in str(loja): continue
-            if st.session_state.get("flt"):
-                det = [d for d in det if st.session_state["flt"].lower() in json.dumps(d, ensure_ascii=False).lower()]
-            qtd_pdv,qtd_dsk = count_pdv_desktop(det)
-            header = group_title_with_badge(f"{loja} — {len(det)} chamado(s)", status_nome)
-            with st.expander(f"{loja} — {len(det)} chamado(s)", expanded=False):
-                st.markdown(header, unsafe_allow_html=True)
-                dup_keys=[d["key"] for d in det if (d["pdv"], d["ativo"]) in verificar_duplicidade(det)]
-                st.caption(header_badges(len(det), qtd_pdv, qtd_dsk, tem_dup=bool(dup_keys)))
-                st.markdown(f"**FSAs:** {', '.join(d['key'] for d in det)}")
-                st.markdown(f"<div class='codebox'>{format_whatsapp_block(loja, det)}</div>", unsafe_allow_html=True)
-
-with tab1: render_lista_por_loja("AGENDAMENTO", pend)
-with tab2: render_lista_por_loja("AGENDADO", agnd)
-with tab3: render_lista_por_loja("TEC-CAMPO", tec)
-
-with tab4:
-    if not HAS_SORTABLES:
-        st.error("Instale: streamlit-sortables==0.3.1")
-    else:
-        def items_from(agrup):
-           return [f"{d['key']} | {loja}" for loja, dets in agrup.items() for d in dets]
+# JQLs
+JQL_PEND   = 'project = FSA AND status = "AGENDAMENTO"'
+JQL_AGEND  = 'project = FSA AND status = "AGENDADO"'
+JQL_TEC    = 'project = FSA AND status = "TEC-CAMPO"'
 
 
-        col1_items, col2_items, col3_items = items_from(pend), items_from(agnd), items_from(tec)
-        cols = st.columns(3)
-        with cols[0]: st.markdown(badge("AGENDAMENTO","pending"), unsafe_allow_html=True)
-        with cols[1]: st.markdown(badge("AGENDADO","scheduled"), unsafe_allow_html=True)
-        with cols[2]: st.markdown(badge("TEC-CAMPO","tec"), unsafe_allow_html=True)
+# ── Caching p/ reduzir delay (TTL=60s) ─────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_issues_cached(jql: str):
+    return jira.buscar_chamados(jql, FIELDS)
 
-        result = sort_items(
-            [col1_items, col2_items, col3_items],
-            multi_containers=True, direction="vertical", use_drag_handle=True,
-            styles={"container":{"background":"#0B0F14","minHeight":"260px","padding":"6px"},
-                    "ghost":{"opacity":0.2}},
-            key="kanban-v1"
-        )
+@st.cache_data(ttl=60, show_spinner=False)
+def agrupar_por_loja_cached(issues: list):
+    return jira.agrupar_chamados(issues)
 
-        if st.button("Aplicar mudanças"):
-            transition_targets={0:"AGENDAMENTO",1:"AGENDADO",2:"TEC-CAMPO"}
-            moved=0
-            for col_idx, cards in enumerate(result):
-                alvo=transition_targets[col_idx]
-                for card in cards:
-                    key=card.split("|")[0].strip()
-                    trans=jira.get_transitions(key)
-                    tid=next((t["id"] for t in trans if t.get("to",{}).get("name","").upper()==alvo),None)
-                    if tid and jira.transicionar_status(key, tid).status_code==204:
-                        moved+=1
-            st.success(f"Transições aplicadas: {moved}")
-            refresh()
+
+# Botão de atualizar agora → limpa cache + rerun
+col_refresh1, col_refresh2 = st.columns([1, 5])
+with col_refresh1:
+    if st.button("🔄 Atualizar agora"):
+        st.cache_data.clear()
+        st.experimental_rerun()
+with col_refresh2:
+    st.caption("Dica: o painel usa cache de 60s para reduzir o delay e evitar refresh total a cada clique.")
 
 st.markdown("---")
-st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+
+# ── Busca (cache) ──────────────────────────────────────────────────────────
+pendentes_raw = fetch_issues_cached(JQL_PEND)
+agendados_raw = fetch_issues_cached(JQL_AGEND)
+tec_raw       = fetch_issues_cached(JQL_TEC)
+
+agrup_pend  = agrupar_por_loja_cached(pendentes_raw)
+agrup_agend = agrupar_por_loja_cached(agendados_raw)
+agrup_tec   = agrupar_por_loja_cached(tec_raw)
+
+# ── Tabs ───────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4 = st.tabs(["PENDENTES", "AGENDADOS", "TEC-CAMPO", "KANBAN (arrastar & soltar)"])
+
+# ====== helper bloco por loja ======
+def bloco_por_loja(status_nome: str, loja: str, detalhes: list):
+    # cabeçalho “badge”
+    if status_nome == "pendentes":
+        st.markdown(badge("PENDENTE", "pending"), unsafe_allow_html=True)
+    elif status_nome == "agendados":
+        st.markdown(badge("AGENDADO", "scheduled"), unsafe_allow_html=True)
+    else:
+        st.markdown(badge("TEC‑CAMPO", "tec"), unsafe_allow_html=True)
+
+    st.code(gerar_mensagem_whatsapp(loja, detalhes), language="text")
+
+
+# ====== Tab PENDENTES ======
+with tab1:
+    st.subheader(f"Chamados PENDENTES ({sum(len(v) for v in agrup_pend.values())})")
+    if not pendentes_raw:
+        st.info("Nenhum chamado em AGENDAMENTO.")
+    else:
+        for loja, dets in sorted(agrup_pend.items()):
+            with st.expander(f"{loja} — {len(dets)} chamado(s)"):
+                bloco_por_loja("pendentes", loja, dets)
+
+
+# ====== Tab AGENDADOS ======
+with tab2:
+    st.subheader(f"Chamados AGENDADOS ({sum(len(v) for v in agrup_agend.values())})")
+    if not agendados_raw:
+        st.info("Nenhum chamado em AGENDADO.")
+    else:
+        # agrupados por data de agendamento (somente para título)
+        grupos_por_data = defaultdict(lambda: defaultdict(list))
+        for i in agendados_raw:
+            f = i["fields"]
+            loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
+            raw  = f.get("customfield_12036")
+            data_str = "Sem data"
+            if raw:
+                try:
+                    # 2025-08-11T18:00:00.000-0300 -> 11/08/2025
+                    data_str = raw[:10]
+                    y, m, d = data_str.split("-")
+                    data_str = f"{d}/{m}/{y}"
+                except Exception:
+                    pass
+            grupos_por_data[data_str][loja].append(i)
+
+        for data_str, lojas in sorted(grupos_por_data.items()):
+            total = sum(len(v) for v in lojas.values())
+            st.subheader(f"{data_str} — {total} chamado(s)")
+            for loja, iss in sorted(lojas.items()):
+                detalhes = agrupar_por_loja_cached(iss)[loja]
+                with st.expander(f"{loja} — {len(iss)} chamado(s)"):
+                    bloco_por_loja("agendados", loja, detalhes)
+
+
+# ====== Tab TEC‑CAMPO ======
+with tab3:
+    st.subheader(f"Chamados TEC‑CAMPO ({sum(len(v) for v in agrup_tec.values())})")
+    if not tec_raw:
+        st.info("Nenhum chamado em TEC‑CAMPO.")
+    else:
+        for loja, dets in sorted(agrup_tec.items()):
+            with st.expander(f"{loja} — {len(dets)} chamado(s)"):
+                bloco_por_loja("tec", loja, dets)
+
+
+# ====== Tab KANBAN (arrastar & soltar) ======
+with tab4:
+    st.subheader("Kanban por Loja (arraste os FSAs entre colunas para transicionar)")
+    st.caption("Dica: arraste; ao finalizar, clique em **Aplicar mudanças**.")
+
+    # listas de strings “FSA-XXXX | Loja”
+    def _fmt_items(issues):
+        out = []
+        for i in issues:
+            f = i["fields"]
+            loja = f.get("customfield_14954", {}).get("value", "--")
+            out.append(f"{i['key']} | {loja}")
+        return out
+
+    col1_items = _fmt_items(pendentes_raw)
+    col2_items = _fmt_items(agendados_raw)
+    col3_items = _fmt_items(tec_raw)
+
+    cols = st.columns(3)
+    with cols[0]:
+        st.markdown(badge("AGENDAMENTO", "pending"), unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown(badge("AGENDADO", "scheduled"), unsafe_allow_html=True)
+    with cols[2]:
+        st.markdown(badge("TEC‑CAMPO", "tec"), unsafe_allow_html=True)
+
+    # streamlit-sortables 0.3.1 → assinatura simples
+    result = sort_items(
+        [col1_items, col2_items, col3_items],
+        index=[0, 1, 2],
+        direction="vertical",
+        styles={
+            "container": {"background": "#0B0F14", "minHeight": "220px", "borderRadius": "10px"},
+            "item": {"background": "#121821", "border": "1px solid #223047", "padding": "8px 10px",
+                     "borderRadius": "8px", "margin": "6px 8px", "color": "#E6F0FF", "fontSize": "14px"},
+            "ghost": {"opacity": 0.3},
+        },
+        key="kanban"
+    )
+
+    new_col1, new_col2, new_col3 = result
+
+    def _just_keys(lst):
+        # "FSA-123 | Loja" -> "FSA-123"
+        return {x.split("|", 1)[0].strip() for x in lst}
+
+    moved_to_agend  = _just_keys(new_col2) - _just_keys(col2_items)
+    moved_to_tec    = _just_keys(new_col3) - _just_keys(col3_items)
+
+    if moved_to_agend or moved_to_tec:
+        with st.expander("⚙️ Aplicar mudanças"):
+            st.write("→ **AGENDADO**:", ", ".join(sorted(moved_to_agend)) or "—")
+            st.write("→ **TEC‑CAMPO**:", ", ".join(sorted(moved_to_tec)) or "—")
+            if st.button("Aplicar agora"):
+                applied = 0
+                # a) mover para AGENDADO
+                for k in moved_to_agend:
+                    trans = jira.get_transitions(k)
+                    agid = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
+                    if agid and jira.transicionar_status(k, agid).status_code == 204:
+                        applied += 1
+                # b) mover para TEC‑CAMPO
+                for k in moved_to_tec:
+                    trans = jira.get_transitions(k)
+                    tcid = next((t["id"] for t in trans if "tec-campo" in t.get("to", {}).get("name", "").lower()), None)
+                    if tcid and jira.transicionar_status(k, tcid).status_code == 204:
+                        applied += 1
+                st.success(f"Transições aplicadas: {applied}")
+                st.toast("Atualizando lista...", icon="✅")
+                st.cache_data.clear()
+                st.experimental_rerun()
+
+st.markdown("---")
+st.caption("Cache: 60s • Evita recarregar a página inteira a cada ação • Use 'Atualizar agora' para forçar.")
+
