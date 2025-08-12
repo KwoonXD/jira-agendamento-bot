@@ -263,7 +263,7 @@ with tab4:
                 st.code("\n".join(falhas))
             if ok:
                 st.success(f"{ok} chamado(s) atualizado(s).")
-                st.cache_data.clear()
-                st.experimental_rerun()
+             st.cache_data.clear()
+st.rerun()
 
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
