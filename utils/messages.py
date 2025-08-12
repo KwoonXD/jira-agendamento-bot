@@ -1,13 +1,12 @@
 # utils/messages.py
-# utils/messages.py
-# bloco de geração de mensagem WhatsApp (ISO/RAT no final)
+# links padrão
 ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
 ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
 RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
 
 def _is_desktop(ch: dict) -> bool:
-    """Desktop se PDV == 300 ou se 'desktop' aparecer em ATIVO."""
+    """Desktop se PDV == 300 ou se 'desktop' aparecer no ATIVO."""
     try:
         pdv = str(ch.get("pdv", "")).strip()
         ativo = str(ch.get("ativo", "")).lower()
@@ -16,38 +15,35 @@ def _is_desktop(ch: dict) -> bool:
         return False
 
 
-def _fmt_line_link(label: str, url: str) -> str:
-    return f"{label}: {url}"
+def _line(label: str, value: str) -> str:
+    return f"{label}: {value}"
 
 
 def gerar_mensagem_whatsapp(loja: str, chamados: list) -> str:
     """
-    Mensagem por loja:
-    - Sem 'Data agendada' no corpo do chamado
-    - ISO + RAT apenas no bloco “⚠️ É OBRIGATÓRIO LEVAR”
+    Geração de texto para WhatsApp/operacional.
+    - NÃO mostra 'Status' nem 'Tipo de atendimento'
+    - ISO e RAT apenas no bloco final '⚠️ É OBRIGATÓRIO LEVAR'
     """
     blocos = []
     endereco_info = None
     algum_desktop = False
 
     for ch in chamados:
-        is_desktop = _is_desktop(ch)
-        if is_desktop:
+        if _is_desktop(ch):
             algum_desktop = True
 
         linhas = [
             f"*{ch.get('key','--')}*",
-            f"Loja: {loja}",
-            f"Status: {ch.get('status','--')}",
-            f"PDV: {ch.get('pdv','--')}",
+            _line("Loja", loja),
+            _line("PDV", str(ch.get("pdv", "--"))),
             f"*ATIVO:* {ch.get('ativo','--')}",
-            f"Tipo de atendimento: {'Desktop' if is_desktop else 'PDV'}",
-            f"Problema: {ch.get('problema','--')}",
+            _line("Problema", ch.get("problema", "--")),
             "***",
         ]
         blocos.append("\n".join(linhas))
 
-        # endereço 1x (último sobrescreve – ok para mesma loja)
+        # endereço: apenas 1 vez (último do loop serve)
         endereco_info = (
             ch.get("endereco", "--"),
             ch.get("estado", "--"),
@@ -56,20 +52,19 @@ def gerar_mensagem_whatsapp(loja: str, chamados: list) -> str:
         )
 
     if endereco_info:
+        iso_label = "• ISO do Desktop" if algum_desktop else "• ISO do PDV"
+        iso_link  = ISO_DESKTOP_URL if algum_desktop else ISO_PDV_URL
         blocos.append(
             "\n".join(
                 [
-                    f"Endereço: {endereco_info[0]}",
-                    f"Estado: {endereco_info[1]}",
-                    f"CEP: {endereco_info[2]}",
-                    f"Cidade: {endereco_info[3]}",
+                    _line("Endereço", endereco_info[0]),
+                    _line("Estado",   endereco_info[1]),
+                    _line("CEP",      endereco_info[2]),
+                    _line("Cidade",   endereco_info[3]),
                     "------",
                     "⚠️ *É OBRIGATÓRIO LEVAR:*",
-                    _fmt_line_link(
-                        "• ISO do Desktop" if algum_desktop else "• ISO do PDV",
-                        ISO_DESKTOP_URL if algum_desktop else ISO_PDV_URL,
-                    ),
-                    _fmt_line_link("• RAT", RAT_URL),
+                    _line(iso_label, iso_link),
+                    _line("• RAT", RAT_URL),
                 ]
             )
         )
@@ -87,4 +82,3 @@ def verificar_duplicidade(chamados):
         else:
             seen[key] = True
     return duplicates
-
