@@ -1,40 +1,21 @@
 # streamlit_app.py
-import sys
-from datetime import datetime, date, time
+from __future__ import annotations
+
 from collections import defaultdict
-from typing import List, Dict, Any, Tuple, Iterable
+from datetime import datetime, date, time
+from typing import Any, Dict, List, Tuple
 
 import streamlit as st
 import requests
 
-from utils.jira_api import JiraAPI
+from utils.jira_api import JiraAPI, JiraConfig
+from utils.messages import gerar_mensagem, verificar_duplicidade, is_desktop
 
-# ─────────────────────────────────────────────────────────────
-# Config da página
-# ─────────────────────────────────────────────────────────────
+# ==========================
+# Config & Constantes
+# ==========================
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 
-# Banner e tema leve
-st.markdown(
-    """
-    <style>
-      .status-badge{padding:2px 8px;border-radius:999px;font-weight:600}
-      .b-pend{background:#ffc10722;color:#b38700;border:1px solid #ffc10766}
-      .b-agnd{background:#0dcaf022;color:#0b7285;border:1px solid #0dcaf066}
-      .b-tec{background:#20c99722;color:#116b5c;border:1px solid #20c99766}
-      .mono{font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace}
-      .small{font-size:12px;opacity:.8}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.title("📱 Painel Field Service")
-
-
-# ─────────────────────────────────────────────────────────────
-# Utilidades
-# ─────────────────────────────────────────────────────────────
 FIELDS = (
     "key,status,summary,"
     "customfield_14954,"   # Loja (Dropdown)
@@ -46,7 +27,7 @@ FIELDS = (
     "customfield_11993,"   # CEP
     "customfield_11994,"   # Cidade
     "customfield_12036,"   # Data agendada
-    "customfield_12279"    # Dados dos Técnicos (campo rich-text)
+    "customfield_12279"    # Dados do Técnico (ADF)
 )
 
 JQL = {
@@ -55,69 +36,52 @@ JQL = {
     "TEC-CAMPO": 'project = FSA AND status = "TEC-CAMPO"',
 }
 
-def _jira() -> JiraAPI:
-    return JiraAPI(
+# Links padrão
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
+
+
+# ==========================
+# Helpers
+# ==========================
+def jira_client() -> JiraAPI:
+    cfg = JiraConfig(
         email=st.secrets["jira"]["email"],
         api_token=st.secrets["jira"]["api_token"],
-        jira_url=st.secrets["jira"]["url"],
+        url=st.secrets["jira"]["url"],
         timeout=25,
     )
+    return JiraAPI(cfg)
 
-def _fmt_dt_iso(d: date, t: time) -> str:
-    # Ajuste fuso se quiser (aqui -03:00 fixo)
+
+def fmt_iso(d: date, t: time) -> str:
     return datetime.combine(d, t).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
 
-def _is_desktop(ativo: str, pdv: str) -> bool:
-    # Regras usadas anteriormente: PDV 300+ é Desktop, ou se "Desktop" aparece no Ativo
-    try:
-        if pdv and str(pdv).strip().isdigit() and int(str(pdv).strip()) >= 300:
-            return True
-    except Exception:
-        pass
-    return isinstance(ativo, str) and ("desktop" in ativo.lower())
 
-def _gerar_mensagem(loja: str, chamados: List[Dict[str, Any]]) -> str:
-    """
-    Mensagem compacta por loja (para WhatsApp/Teams).
-    NÃO inclui tipo de atendimento nem status (pedido recente).
-    ISO fica na sessão de “Obrigatório levar” — fora desta mensagem.
-    """
-    blocos = []
-    ref_end = None
-    for ch in chamados:
-        lin = [
-            f"*{ch.get('key','--')}*",
-            f"Loja: {loja}",
-            f"PDV: {ch.get('pdv','--')}",
-            f"*ATIVO: {ch.get('ativo','--')}*",
-            f"Problema: {ch.get('problema','--')}",
-            "***"
-        ]
-        blocos.append("\n".join(lin))
-        # endereço de referência
-        if any(ch.get(k) for k in ("endereco","estado","cep","cidade")):
-            ref_end = ch
+def lojas_de(*agrup_dicts: Dict[str, Any]) -> List[str]:
+    s = set()
+    for g in agrup_dicts:
+        s.update(g.keys())
+    return sorted(s)
 
-    if ref_end:
-        blocos.append(
-            "\n".join([
-                f"Endereço: {ref_end.get('endereco','--')}",
-                f"Estado: {ref_end.get('estado','--')}",
-                f"CEP: {ref_end.get('cep','--')}",
-                f"Cidade: {ref_end.get('cidade','--')}",
-            ])
-        )
 
-    return "\n\n".join(blocos)
+def obrigatorios_levar(detalhes: List[Dict[str, Any]]) -> str:
+    precisa_iso_desktop = any(is_desktop(d.get("ativo"), d.get("pdv")) for d in detalhes)
+    if precisa_iso_desktop:
+        return f"[ISO Desktop]({ISO_DESKTOP_URL})"
+    return f"[ISO PDV]({ISO_PDV_URL})"
 
-@st.cache_data(ttl=120, show_spinner=False)
-def _carregar() -> Dict[str, Any]:
-    """Carrega issues por status, já agrupadas por loja."""
-    cli = _jira()
+
+# ==========================
+# Cache de dados
+# ==========================
+@st.cache_data(ttl=120, show_spinner=True)
+def carregar() -> Dict[str, Any]:
+    cli = jira_client()
     pend_raw = cli.buscar_chamados(JQL["PENDENTE"], FIELDS)
     agnd_raw = cli.buscar_chamados(JQL["AGENDADO"], FIELDS)
     tec_raw  = cli.buscar_chamados(JQL["TEC-CAMPO"], FIELDS)
-
     return {
         "raw": {"PENDENTE": pend_raw, "AGENDADO": agnd_raw, "TEC-CAMPO": tec_raw},
         "grp": {
@@ -128,97 +92,99 @@ def _carregar() -> Dict[str, Any]:
     }
 
 
-# ─────────────────────────────────────────────────────────────
-# Carga de dados com tratamento de erro
-# ─────────────────────────────────────────────────────────────
+# ==========================
+# Safe load
+# ==========================
 try:
-    data = _carregar()
+    data = carregar()
 except requests.HTTPError as e:
-    st.error("❌ Falha ao consultar a API do Jira. Verifique URL, email e token.")
-    with st.expander("Detalhes da exceção"):
+    st.error("Não foi possível consultar a API do Jira. Verifique URL / email / token.")
+    with st.expander("Detalhes do erro"):
         st.exception(e)
     st.stop()
 except Exception as e:
-    st.error("❌ Erro inesperado ao carregar dados.")
-    with st.expander("Detalhes da exceção"):
+    st.error("Erro inesperado ao carregar dados.")
+    with st.expander("Detalhes do erro"):
         st.exception(e)
     st.stop()
 
+grp_pend = data["grp"]["PENDENTE"]
+grp_agnd = data["grp"]["AGENDADO"]
+grp_tec  = data["grp"]["TEC-CAMPO"]
 
-# ─────────────────────────────────────────────────────────────
-# Sidebar — Filtros Globais + Ações em Lote
-# ─────────────────────────────────────────────────────────────
+
+# ==========================
+# Sidebar — Filtros + Lote
+# ==========================
 with st.sidebar:
-    st.header("🔎 Filtros")
-    # Colete todas as lojas dos três grupos
-    lojas_all = set(data["grp"]["PENDENTE"].keys()) | set(data["grp"]["AGENDADO"].keys()) | set(data["grp"]["TEC-CAMPO"].keys())
-    lojas_sel = st.multiselect("Lojas", sorted(lojas_all))
+    st.header("Filtros")
+    todas_lojas = lojas_de(grp_pend, grp_agnd, grp_tec)
+    lojas_sel = st.multiselect("Lojas", todas_lojas)
     chave_like = st.text_input("Filtrar por FSA (ex: FSA-123)")
 
     st.markdown("---")
-    st.header("⚡ Transição em Lote")
+    st.header("Transição em lote")
 
-    alvo = st.selectbox("Mover para status:", ["—", "AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
-    st.caption("Selecione abaixo os FSAs (de qualquer aba); se destino for **AGENDADO**, data/hora e técnico são obrigatórios.")
+    destino = st.selectbox("Mover para:", ["—", "AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
 
-    # Colete lista de chaves conforme filtro global
-    def _lista_chaves_filtradas() -> List[str]:
-        res = []
-        for status_nome in ("PENDENTE", "AGENDADO", "TEC-CAMPO"):
-            for loja, itens in data["grp"][status_nome].items():
-                if lojas_sel and loja not in lojas_sel:
+    # monta lista de chaves com filtro global aplicado
+    def listar_chaves_filtradas() -> List[str]:
+        out: List[str] = []
+        for g in (grp_pend, grp_agnd, grp_tec):
+            for loja, itens in g.items():
+                if lojas_sel and loja not in lojas_sel:  # filtra por loja se selecionado
                     continue
                 for d in itens:
-                    if chave_like and chave_like.lower() not in d["key"].lower():
+                    k = d.get("key", "")
+                    if chave_like and chave_like.lower() not in k.lower():
                         continue
-                    res.append(d["key"])
-        return sorted(res)
+                    out.append(k)
+        return sorted(set(out))
 
-    opts = _lista_chaves_filtradas()
-    sel_keys = st.multiselect("FSAs selecionados", opts, placeholder="Escolha um ou mais FSAs...")
+    chaves_opcoes = listar_chaves_filtradas()
+    chaves_sel = st.multiselect("FSAs", chaves_opcoes, placeholder="Selecione um ou mais...")
 
-    extra_fields = {}
-    if alvo == "AGENDADO":
-        st.markdown("**Dados de Agendamento (obrigatórios)**")
+    extra_fields: Dict[str, Any] = {}
+    if destino == "AGENDADO":
+        st.markdown("**Agendamento (obrigatório para mover a AGENDADO)**")
         d = st.date_input("Data", value=date.today())
         h = st.time_input("Hora", value=time(9, 0))
-        tec = st.text_input("Dados dos Técnicos (Nome-CPF-RG-TEL)")
+        tec = st.text_input("Dados do Técnico (Nome-CPF-RG-TEL)")
+
         if d and h:
-            extra_fields["customfield_12036"] = _fmt_dt_iso(d, h)
+            extra_fields["customfield_12036"] = fmt_iso(d, h)
         if tec:
-            # campo rich-text (Atlassian Document Format)
             extra_fields["customfield_12279"] = {
-                "type": "doc", "version": 1,
-                "content": [{"type": "paragraph", "content": [{"type": "text", "text": tec}]}]
+                "type": "doc",
+                "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": tec}]}],
             }
 
-    btn = st.button("Aplicar transição em lote", type="primary", use_container_width=True)
-
-    if btn:
-        if not sel_keys or alvo == "—":
-            st.warning("Selecione ao menos um FSA e um **status destino**.")
-        elif alvo == "AGENDADO" and ("customfield_12036" not in extra_fields or "customfield_12279" not in extra_fields):
-            st.warning("Para mover a **AGENDADO**, preencha **Data/Hora** e **Dados do Técnico**.")
+    if st.button("Aplicar", type="primary", use_container_width=True):
+        if not chaves_sel or destino == "—":
+            st.warning("Selecione FSAs e o status de destino.")
+        elif destino == "AGENDADO" and ("customfield_12036" not in extra_fields or "customfield_12279" not in extra_fields):
+            st.warning("Para mover a AGENDADO, preencha Data/Hora e Dados do Técnico.")
         else:
-            cli = _jira()
+            cli = jira_client()
             ok = 0
-            falhas = []
-            for k in sel_keys:
+            falhas: List[str] = []
+            for k in chaves_sel:
                 try:
-                    transitions = cli.get_transitions(k)
-                    # Procura por nome do destino (no 'to') ou pelo nome da transição contendo o termo
-                    tgt_id = next(
+                    trans = cli.get_transitions(k)
+                    tgt = next(
                         (
-                            t["id"] for t in transitions
-                            if alvo.lower() in (t.get("to", {}).get("name", "").lower())
-                            or alvo.lower() in t.get("name", "").lower()
+                            t["id"]
+                            for t in trans
+                            if destino.lower() in (t.get("to", {}).get("name", "").lower())
+                            or destino.lower() in t.get("name", "").lower()
                         ),
-                        None
+                        None,
                     )
-                    if not tgt_id:
-                        falhas.append(f"{k}: transição '{alvo}' indisponível")
+                    if not tgt:
+                        falhas.append(f"{k}: transição '{destino}' indisponível")
                         continue
-                    r = cli.transicionar_status(k, tgt_id, fields=(extra_fields or None))
+                    r = cli.transicionar_status(k, tgt, fields=(extra_fields or None))
                     if r.status_code == 204:
                         ok += 1
                     else:
@@ -227,142 +193,118 @@ with st.sidebar:
                     falhas.append(f"{k}: {e}")
 
             if ok:
-                st.success(f"✅ {ok} chamado(s) atualizado(s).")
+                st.success(f"{ok} chamado(s) atualizado(s).")
                 st.cache_data.clear()
                 st.rerun()
             if falhas:
                 st.error("Falhas:")
-                for f in falhas[:20]:
+                for f in falhas[:30]:
                     st.code(f)
 
 
-# ─────────────────────────────────────────────────────────────
-# Helpers de renderização
-# ─────────────────────────────────────────────────────────────
-def _aplicar_filtros(lista: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = []
-    for d in lista:
-        if lojas_sel:
-            # 'loja' não vem dentro do d, então filtramos na montagem
-            pass
-        if chave_like and chave_like.lower() not in d["key"].lower():
+# ==========================
+# Funções de renderização
+# ==========================
+def aplicar_filtros(itens: List[Dict[str, Any]], loja: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if lojas_sel and loja not in lojas_sel:
+        return out
+    for d in itens:
+        k = d.get("key", "")
+        if chave_like and chave_like.lower() not in k.lower():
             continue
         out.append(d)
     return out
 
-def _header_status(txt: str, cls: str) -> None:
-    st.markdown(f'<span class="status-badge {cls}">{txt}</span>', unsafe_allow_html=True)
 
-def _expander_titulo(loja: str, itens: List[Dict[str, Any]]) -> str:
+def titulo_expander(loja: str, itens: List[Dict[str, Any]]) -> str:
     qtd = len(itens)
-    qtd_pdv = sum(1 for d in itens if _is_desktop(d.get("ativo",""), str(d.get("pdv",""))))
-    return f"{loja} — {qtd} chamado(s) ({qtd_pdv} Desktop)"
+    qtd_desktop = sum(1 for d in itens if is_desktop(d.get("ativo"), d.get("pdv")))
+    return f"{loja} — {qtd} chamado(s) ({qtd_desktop} Desktop)"
 
 
-def _bloco_loja(loja: str, itens: List[Dict[str, Any]]) -> None:
-    """Expansor por loja: mostra chaves, mensagem pronta e 'Obrigatório levar' com ISO conforme regra."""
-    detalhes = list(itens)  # já filtrados por loja no loop do tab
-    # Linha com as chaves
-    st.markdown("**FSAs:** " + ", ".join(d.get("key","--") for d in detalhes))
+def bloco_loja(loja: str, itens: List[Dict[str, Any]]) -> None:
+    if not itens:
+        return
+    # chaves
+    st.markdown("**FSAs:** " + ", ".join(d.get("key", "--") for d in itens))
 
-    # Mensagem compacta (sem status/tipo)
-    st.code(_gerar_mensagem(loja, detalhes), language="text")
+    # mensagem (sem status/tipo)
+    st.code(gerar_mensagem(loja, itens), language="text")
 
-    # Bloco 'Obrigatório levar'
-    # ISO: se houver qualquer Desktop dentro do grupo, exibe link de ISO Desktop
-    precisa_iso_desktop = any(_is_desktop(d.get("ativo",""), str(d.get("pdv",""))) for d in detalhes)
+    # duplicidades
+    dups = verificar_duplicidade(itens)
+    if dups:
+        st.info("Possíveis duplicidades (PDV, ATIVO): " + ", ".join(str(x) for x in sorted(dups)))
 
-    # Links — personalize os URLs conforme já usa
-    ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
-    ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
-    RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
-
-    obrigatorios = []
-    if precisa_iso_desktop:
-        obrigatorios.append(f"[ISO Desktop]({ISO_DESKTOP_URL})")
-    else:
-        obrigatorios.append(f"[ISO PDV]({ISO_PDV_URL})")
-
-    st.markdown("**🧰 É obrigatório levar:** " + " • ".join(obrigatorios))
-    st.markdown("**📄 RAT:** " + f"[Baixar modelo]({RAT_URL})")
+    # obrigatório levar (ISO) + RAT
+    st.markdown("**Obrigatório levar:** " + obrigatorios_levar(itens))
+    st.markdown("**RAT:** " + f"[Modelo]({RAT_URL})")
 
 
-# ─────────────────────────────────────────────────────────────
-# Abas
-# ─────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["⏳ Pendentes", "📋 Agendados", "🧰 Tec‑Campo"])
+# ==========================
+# UI — Abas
+# ==========================
+tab1, tab2, tab3 = st.tabs(["Pendentes", "Agendados", "Tec‑Campo"])
 
-# ——— PENDENTES
 with tab1:
-    _header_status("AGENDAMENTO", "b-pend")
-    grp = data["grp"]["PENDENTE"]
-    if not grp:
+    st.subheader("Chamados em AGENDAMENTO")
+    if not grp_pend:
         st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
-        for loja, itens in sorted(grp.items()):
-            if lojas_sel and loja not in lojas_sel:
-                continue
-            itens_f = _aplicar_filtros(itens)
+        for loja, itens in sorted(grp_pend.items()):
+            itens_f = aplicar_filtros(itens, loja)
             if not itens_f:
                 continue
-            with st.expander(_expander_titulo(loja, itens_f), expanded=False):
-                _bloco_loja(loja, itens_f)
+            with st.expander(titulo_expander(loja, itens_f), expanded=False):
+                bloco_loja(loja, itens_f)
 
-# ——— AGENDADOS
 with tab2:
-    _header_status("AGENDADO", "b-agnd")
-    # Agrupar por data (dd/mm/aaaa) → loja
+    st.subheader("Chamados AGENDADOS (agrupados por data)")
     raw = data["raw"]["AGENDADO"]
-    grouped = defaultdict(lambda: defaultdict(list))
-    for issue in raw:
-        f = issue.get("fields", {})
-        loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
-        raw_dt = f.get("customfield_12036")
-        if raw_dt:
-            try:
-                dt = datetime.strptime(raw_dt, "%Y-%m-%dT%H:%M:%S.%f%z")
-            except Exception:
-                try:
-                    dt = datetime.strptime(raw_dt, "%Y-%m-%dT%H:%M:%S%z")
-                except Exception:
-                    dt = None
-            data_str = dt.strftime("%d/%m/%Y") if dt else "Sem data"
-        else:
-            data_str = "Sem data"
-        grouped[data_str][loja].append(issue)
-
     if not raw:
         st.info("Nenhum chamado em AGENDADO.")
     else:
+        grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        for issue in raw:
+            f = issue.get("fields", {}) or {}
+            loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
+            raw_dt = f.get("customfield_12036")
+            if raw_dt:
+                dt = None
+                for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+                    try:
+                        dt = datetime.strptime(raw_dt, fmt)
+                        break
+                    except Exception:
+                        pass
+                data_str = dt.strftime("%d/%m/%Y") if dt else "Sem data"
+            else:
+                data_str = "Sem data"
+            grouped[data_str][loja].append(issue)
+
         for data_str, lojas in sorted(grouped.items()):
             total = sum(len(v) for v in lojas.values())
-            st.subheader(f"{data_str} — {total} chamado(s)")
-            for loja, iss in sorted(lojas.items()):
-                if lojas_sel and loja not in lojas_sel:
-                    continue
-                # Converter para o formato do agrupar_chamados
-                detalhes = _jira().agrupar_chamados(iss)[loja]
-                detalhes_f = _aplicar_filtros(detalhes)
+            st.markdown(f"### {data_str} — {total} chamado(s)")
+            for loja, issues in sorted(lojas.items()):
+                detalhes = jira_client().agrupar_chamados(issues)[loja]
+                detalhes_f = aplicar_filtros(detalhes, loja)
                 if not detalhes_f:
                     continue
-                with st.expander(_expander_titulo(loja, detalhes_f), expanded=False):
-                    _bloco_loja(loja, detalhes_f)
+                with st.expander(titulo_expander(loja, detalhes_f), expanded=False):
+                    bloco_loja(loja, detalhes_f)
 
-# ——— TEC-CAMPO
 with tab3:
-    _header_status("TEC‑CAMPO", "b-tec")
-    grp = data["grp"]["TEC-CAMPO"]
-    if not grp:
+    st.subheader("Chamados em TEC‑CAMPO")
+    if not grp_tec:
         st.info("Nenhum chamado em TEC‑CAMPO.")
     else:
-        for loja, itens in sorted(grp.items()):
-            if lojas_sel and loja not in lojas_sel:
-                continue
-            itens_f = _aplicar_filtros(itens)
+        for loja, itens in sorted(grp_tec.items()):
+            itens_f = aplicar_filtros(itens, loja)
             if not itens_f:
                 continue
-            with st.expander(_expander_titulo(loja, itens_f), expanded=False):
-                _bloco_loja(loja, itens_f)
+            with st.expander(titulo_expander(loja, itens_f), expanded=False):
+                bloco_loja(loja, itens_f)
 
 st.markdown("---")
 st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
