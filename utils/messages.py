@@ -1,76 +1,70 @@
 # utils/messages.py
-from typing import Iterable, Dict, Any, List, Set, Tuple
+from __future__ import annotations
+from typing import Dict, List, Tuple, Set
 
-# Links padrão – personalize via st.secrets no app, se quiser
-ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
-ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
-RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
-def _is_desktop(pdv: str | int | None, ativo: str | None) -> bool:
-    pdv_str = str(pdv or "").strip()
-    ativo_str = (ativo or "").lower()
-    return pdv_str == "300" or "desktop" in ativo_str
-
-def _fmt_endereco(ch: Dict[str, Any]) -> List[str]:
-    return [
-        f"Endereço: {ch.get('endereco','--')}",
-        f"Estado: {ch.get('estado','--')}",
-        f"CEP: {ch.get('cep','--')}",
-        f"Cidade: {ch.get('cidade','--')}",
-    ]
-
-def gerar_mensagem(loja: str, chamados: Iterable[Dict[str, Any]]) -> str:
+def is_desktop(ativo: str | None, pdv: str | int | None) -> bool:
     """
-    Gera o texto para WhatsApp/Teams (sem Status e sem Tipo de atendimento).
-    Inclui bloco '⚠️ É OBRIGATÓRIO LEVAR' com ISO(s) e RAT no final.
+    Regras combinadas:
+      - PDV numérico >= 300 => Desktop
+      - Ou se o texto do ativo contiver "desktop"
     """
-    chamados = list(chamados)  # materializa
+    if isinstance(pdv, (int,)) and pdv >= 300:
+        return True
+    if isinstance(pdv, str):
+        s = pdv.strip()
+        if s.isdigit() and int(s) >= 300:
+            return True
+    if isinstance(ativo, str) and "desktop" in ativo.lower():
+        return True
+    return False
+
+
+def gerar_mensagem(loja: str, chamados: List[Dict]) -> str:
+    """
+    Gera mensagem por loja para envio (WhatsApp/Teams/Email).
+    NÃO inclui tipo de atendimento nem status (pedido recente).
+    A ISO é tratada na tela (não aqui).
+    """
     blocos: List[str] = []
+    ref_end = None
 
     for ch in chamados:
         linhas = [
             f"*{ch.get('key','--')}*",
             f"Loja: {loja}",
             f"PDV: {ch.get('pdv','--')}",
-            f"*ATIVO:* {ch.get('ativo','--')}",
+            f"*ATIVO: {ch.get('ativo','--')}*",
             f"Problema: {ch.get('problema','--')}",
             "***",
         ]
         blocos.append("\n".join(linhas))
 
-    # Endereço (uma vez por loja — pega do último chamado que tenha dados)
-    ref = None
-    for c in reversed(chamados):
-        if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade")):
-            ref = c
-            break
-    if ref:
-        blocos.append("\n".join(_fmt_endereco(ref)))
+        if any(ch.get(k) for k in ("endereco", "estado", "cep", "cidade")):
+            ref_end = ch  # última referência com endereço válido
 
-    # Bloco obrigatório com links
-    any_desktop = any(_is_desktop(c.get("pdv"), c.get("ativo")) for c in chamados)
-    any_pdv     = any(not _is_desktop(c.get("pdv"), c.get("ativo")) for c in chamados)
+    if ref_end:
+        blocos.append("\n".join([
+            f"Endereço: {ref_end.get('endereco','--')}",
+            f"Estado: {ref_end.get('estado','--')}",
+            f"CEP: {ref_end.get('cep','--')}",
+            f"Cidade: {ref_end.get('cidade','--')}",
+        ]))
 
-    obrigatorio: List[str] = ["------", "⚠️ *É OBRIGATÓRIO LEVAR:*"]
-    if any_desktop:
-        obrigatorio.append(f"• ISO (Desktop): {ISO_DESKTOP_URL}")
-    if any_pdv:
-        obrigatorio.append(f"• ISO (PDV): {ISO_PDV_URL}")
-    obrigatorio.append(f"• RAT: {RAT_URL}")
-
-    blocos.append("\n".join(obrigatorio))
     return "\n\n".join(blocos)
 
-def verificar_duplicidade(chamados: Iterable[Dict[str, Any]]) -> Set[Tuple[str, str]]:
+
+def verificar_duplicidade(chamados: List[Dict]) -> Set[Tuple[str | None, str | None]]:
     """
-    Retorna pares (pdv, ativo) repetidos.
+    Retorna tuplas (pdv, ativo) duplicadas dentro da coleção de chamados.
+    Útil para destacar potenciais duplicidades.
     """
-    vistos: Set[Tuple[str, str]] = set()
-    dup: Set[Tuple[str, str]] = set()
+    seen: set[Tuple[str | None, str | None]] = set()
+    dup: set[Tuple[str | None, str | None]] = set()
     for ch in chamados:
-        key = (str(ch.get("pdv") or ""), str(ch.get("ativo") or ""))
-        if key in vistos:
+        key = (ch.get("pdv"), ch.get("ativo"))
+        if key in seen:
             dup.add(key)
         else:
-            vistos.add(key)
+            seen.add(key)
     return dup
