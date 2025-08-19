@@ -1,5 +1,3 @@
-import os
-from pathlib import Path
 from collections import defaultdict
 
 import streamlit as st
@@ -10,58 +8,32 @@ from utils.messages import agrupar_por_data, gerar_mensagem_whatsapp, ISO_PDV_UR
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st.title("Painel Field Service")
 
-# ---------------- Persistência de credenciais ----------------
-CREDS_FILE = Path("credentials.yaml")
-
-def _load_from_secrets() -> tuple[str,str,str] | None:
+# ------------------- Somente st.secrets -------------------
+def _get_secret_or_fail():
     try:
-        s = st.secrets["jira"]
-        return s["url"], s["email"], s["token"]
+        cfg = st.secrets["jira"]
+        url   = cfg["url"]
+        email = cfg["email"]
+        token = cfg["token"]
+        if not (url and email and token):
+            raise KeyError("Valores vazios em secrets.")
+        return url, email, token
     except Exception:
-        return None
+        st.error(
+            "Credenciais do Jira não encontradas em `st.secrets['jira']`.\n\n"
+            "Adicione no **secrets.toml** (local) ou nas **App secrets** (Streamlit Cloud):\n\n"
+            "```toml\n"
+            "[jira]\n"
+            "url   = \"https://delfia.atlassian.net\"\n"
+            "email = \"seu-email@dominio\"\n"
+            "token = \"seu_api_token\"\n"
+            "```\n"
+        )
+        st.stop()
 
-def _load_from_yaml() -> tuple[str,str,str] | None:
-    try:
-        import yaml  # já está em requirements
-        if CREDS_FILE.exists():
-            data = yaml.safe_load(CREDS_FILE.read_text(encoding="utf-8")) or {}
-            j = data.get("jira", {})
-            return j.get("url"), j.get("email"), j.get("token")
-        return None
-    except Exception:
-        return None
+JIRA_URL, JIRA_EMAIL, JIRA_TOKEN = _get_secret_or_fail()
 
-def _save_yaml(url: str, email: str, token: str):
-    import yaml
-    CREDS_FILE.write_text(yaml.safe_dump({"jira":{"url":url,"email":email,"token":token}}, sort_keys=False), encoding="utf-8")
-
-def carregar_credenciais():
-    c = _load_from_secrets()
-    if c and all(c):
-        return c, "secrets"
-    c = _load_from_yaml()
-    if c and all(c):
-        return c, "yaml"
-    return (None, None), None
-
-(creds, origem) = carregar_credenciais()
-url, email, token = (creds if creds != (None, None) else ("","",""))
-
-with st.sidebar:
-    st.caption("Autenticação")
-    url = st.text_input("Jira URL", url or "https://delfia.atlassian.net")
-    email = st.text_input("E-mail", email or "")
-    token = st.text_input("Token", token or "", type="password")
-    col = st.columns(2)
-    with col[0]:
-        testar = st.button("Testar conexão", use_container_width=True)
-    with col[1]:
-        salvar = st.button("Salvar localmente", use_container_width=True)
-    if salvar:
-        _save_yaml(url, email, token)
-        st.success("Credenciais salvas em credentials.yaml")
-
-# --------------- JQLs & fields (simples) ---------------------
+# ----------------- JQLs & fields --------------------------
 JQLS = {
     "agendamento": 'project = FSA AND status = "AGENDAMENTO"',
     "agendado":    'project = FSA AND status = "AGENDADO"',
@@ -69,14 +41,13 @@ JQLS = {
 }
 FIELDS = ",".join([
     "status",
-    # customfields mapeados no JiraAPI.normalizar
     "customfield_14954","customfield_14829","customfield_14825","customfield_12374",
     "customfield_12271","customfield_11948","customfield_11993","customfield_11994",
     "customfield_12036",
 ])
 
 def _cli() -> JiraAPI:
-    return JiraAPI(email=email, api_token=token, jira_url=url)
+    return JiraAPI(email=JIRA_EMAIL, api_token=JIRA_TOKEN, jira_url=JIRA_URL)
 
 @st.cache_data(show_spinner=False, ttl=120)
 def _carregar():
@@ -87,22 +58,10 @@ def _carregar():
         data[nome] = [cli.normalizar(i) for i in issues]
     return data
 
-# Teste rápido
-if testar:
-    try:
-        _ = _carregar()
-        st.sidebar.success(f"Conectado como {email.split('@')[0].upper()}")
-    except Exception as e:
-        st.sidebar.exception(e)
-
-# Evita rodar sem credencial
-if not (url and email and token):
-    st.info("Informe as credenciais ao lado e clique **Testar conexão**.")
-    st.stop()
-
-# ----------------- Conteúdo -----------------------
+# ----------------- Carrega e mostra -----------------------
 try:
     raw = _carregar()
+    st.success(f"Conectado como **{JIRA_EMAIL}**")
 except Exception as e:
     st.exception(e)
     st.stop()
@@ -115,10 +74,8 @@ def _render_status(chamados: list[dict], titulo: str):
         st.info("Nenhum chamado.")
         return
 
-    # agrupa por data agendada (ou “Sem data”)
     por_data = agrupar_por_data(chamados)
     for data_ag, lista in por_data.items():
-        # agrupa por loja
         por_loja = defaultdict(list)
         for ch in lista:
             por_loja[str(ch.get("loja","--"))].append(ch)
@@ -137,5 +94,4 @@ with tabs[1]:
 with tabs[2]:
     _render_status(raw[mapa_status["TEC-CAMPO"]], "TEC-CAMPO")
 
-# Rodapé rápido
 st.caption(f"Links rápidos:  ISO (PDV): {ISO_PDV_URL}  •  RAT: {RAT_URL}")
