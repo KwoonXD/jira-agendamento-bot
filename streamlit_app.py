@@ -1,342 +1,270 @@
+from __future__ import annotations
+
 import os
-from datetime import datetime, time
-from collections import defaultdict
+from datetime import datetime
+from typing import Iterable, List, Dict
+
+import requests
+from requests.auth import HTTPBasicAuth
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
-from utils.jira_api import JiraAPI
-from utils.messages import (
-    gerar_mensagem,
-    verificar_duplicidade,
-    ISO_DESKTOP_URL,
-    ISO_PDV_URL,
-    RAT_URL,
-)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Config Página + Auto-Refresh (90s)
-# ──────────────────────────────────────────────────────────────────────────────
+# ============================
+# CONFIG BÁSICA DA PÁGINA
+# ============================
 st.set_page_config(page_title="Painel Field Service", layout="wide")
-st_autorefresh(interval=90_000, key="auto_refresh")
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+# ============================
+# LINKS PADRÃO (edite se quiser)
+# ============================
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Ler credenciais Jira (secrets → env) + helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def _get(name: str, *env_names: str, default: str = "") -> str:
-    # 1) secrets (chave simples)
-    try:
-        v = st.secrets[name]
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    except Exception:
-        pass
-    # 2) secrets agrupado (ex.: st.secrets["jira"]["email"])
-    for group in ("jira", "JIRA"):
-        try:
-            v = st.secrets[group][name.lower()]  # email/api_token/jira_url
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        except Exception:
-            try:
-                v = st.secrets[group][name.upper()]
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-            except Exception:
-                pass
-    # 3) variáveis de ambiente (primeira que existir)
-    for envn in env_names:
-        v = os.getenv(envn, "").strip()
-        if v:
-            return v
-    return default
+# ============================
+# JQLs e FIELDS usados
+# ============================
+FIELDS = ",".join([
+    "status",
+    "created",
+    "customfield_14954",  # Loja
+    "customfield_14829",  # PDV
+    "customfield_14825",  # Ativo
+    "customfield_12374",  # Problema
+    "customfield_12271",  # Endereço
+    "customfield_11948",  # Estado
+    "customfield_11993",  # CEP
+    "customfield_11994",  # Cidade
+    "customfield_12036",  # Data agendada
+])
 
-EMAIL     = _get("EMAIL", "JIRA_EMAIL")
-API_TOKEN = _get("API_TOKEN", "JIRA_API_TOKEN")
-JIRA_URL  = _get("JIRA_URL", "JIRA_URL", default="https://delfia.atlassian.net")
-
-def _sanitize_url(u: str) -> str:
-    if not u:
-        return u
-    return u.rstrip("/")
-
-EMAIL = EMAIL or ""
-API_TOKEN = API_TOKEN or ""
-JIRA_URL = _sanitize_url(JIRA_URL or "")
-
-if not EMAIL or not API_TOKEN or not JIRA_URL:
-    st.error(
-        "🔐 Credenciais do Jira ausentes.\n\n"
-        "- Configure **EMAIL**, **API_TOKEN**, **JIRA_URL** nos *Secrets* **ou**\n"
-        "- Defina variáveis de ambiente: **JIRA_EMAIL**, **JIRA_API_TOKEN**, **JIRA_URL**."
-    )
-    st.stop()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Inicialização resiliente do JiraAPI
-# ──────────────────────────────────────────────────────────────────────────────
-def _build_jira_client():
-    # 1) assinatura posicional (email, token, url)
-    try:
-        return JiraAPI(EMAIL, API_TOKEN, JIRA_URL)
-    except TypeError:
-        pass
-    # 2) assinatura nomeada
-    try:
-        return JiraAPI(email=EMAIL, api_token=API_TOKEN, jira_url=JIRA_URL)
-    except TypeError:
-        pass
-    # 3) alguns wrappers usam (url, email, token)
-    try:
-        return JiraAPI(JIRA_URL, EMAIL, API_TOKEN)
-    except Exception as e:
-        st.error(f"Falha ao instanciar JiraAPI: {type(e).__name__}: {e}")
-        st.stop()
-
-jira = _build_jira_client()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Campos/JQL
-# ──────────────────────────────────────────────────────────────────────────────
-FIELDS = (
-    "summary,status,customfield_14954,customfield_14829,customfield_14825,"
-    "customfield_12374,customfield_12271,customfield_11993,customfield_11994,"
-    "customfield_11948,customfield_12036,customfield_12279"
-)
 JQLS = {
-    "pend": 'project = FSA AND status = AGENDAMENTO',
-    "agnd": 'project = FSA AND status = AGENDADO',
-    "tec":  'project = FSA AND status in (TEC-CAMPO)'
+    "agendamento": 'project = FSA AND status = "AGENDAMENTO"',
+    "agendado":    'project = FSA AND status = "AGENDADO"',
+    "tec":         'project = FSA AND status = "TEC-CAMPO"',
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def parse_dt(raw: str) -> str:
+
+# ============================
+# CLIENTE JIRA SIMPLES
+# ============================
+class JiraAPI:
+    def __init__(self, email: str, api_token: str, base_url: str):
+        self.email = email
+        self.api_token = api_token
+        self.base_url = base_url.rstrip("/")
+        self._auth = HTTPBasicAuth(email, api_token)
+        self._headers = {"Accept": "application/json"}
+
+    def _get(self, path: str, params: Dict | None = None) -> dict:
+        url = f"{self.base_url}{path}"
+        r = requests.get(url, headers=self._headers, auth=self._auth, params=params or {}, timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+    def buscar_chamados(self, jql: str, fields: str = FIELDS, max_results: int = 200) -> List[dict]:
+        params = {"jql": jql, "fields": fields, "maxResults": max_results}
+        data = self._get("/rest/api/3/search", params=params)
+        return data.get("issues", [])
+
+    def whoami(self) -> dict:
+        return self._get("/rest/api/3/myself")
+
+    @staticmethod
+    def normalizar_issue(issue: dict) -> dict:
+        f = issue.get("fields", {})
+        loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
+        estado = (f.get("customfield_11948") or {}).get("value") or "--"
+        ativo = (f.get("customfield_14825") or {}).get("value") or "--"
+        return {
+            "key": issue.get("key", "--"),
+            "status": (f.get("status") or {}).get("name") or "--",
+            "created": f.get("created"),
+            "loja": loja,
+            "pdv": str(f.get("customfield_14829") or "--"),
+            "ativo": str(ativo),
+            "problema": str(f.get("customfield_12374") or "--"),
+            "endereco": str(f.get("customfield_12271") or "--"),
+            "estado": str(estado),
+            "cep": str(f.get("customfield_11993") or "--"),
+            "cidade": str(f.get("customfield_11994") or "--"),
+            "data_agendada": f.get("customfield_12036"),
+        }
+
+
+# ============================
+# HELPERS DE MENSAGEM/AGRUPAMENTO
+# ============================
+def _fmt_iso_date(raw: str | None) -> str | None:
     if not raw:
-        return "Não definida"
+        return None
     for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
         try:
-            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y %H:%M")
+            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
         except Exception:
             pass
-    return str(raw)
+    return None
 
-def is_desktop(ch: dict) -> bool:
-    """Desktop se: PDV >= 300 ou ativo contém 'desktop' (case-insensitive)."""
-    pdv = str(ch.get("pdv", "")).strip()
-    try:
-        num = int(pdv)
-    except Exception:
-        num = -1
-    ativo = str(ch.get("ativo", "")).lower()
-    return (num >= 300) or ("desktop" in ativo)
+def _is_desktop(pdv: str, ativo: str) -> bool:
+    pdv = str(pdv or "").strip()
+    ativo = str(ativo or "").lower()
+    return pdv == "300" or ("desktop" in ativo)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Cache
-# ──────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=True, ttl=60)
-def carregar():
-    try:
-        pend = jira.buscar_chamados(JQLS["pend"], FIELDS)
-        agnd = jira.buscar_chamados(JQLS["agnd"], FIELDS)
-        tec  = jira.buscar_chamados(JQLS["tec"],  FIELDS)
-    except Exception as e:
-        # Mostra erro com clareza (ex.: HTTP 401/403/404/500)
-        st.error(f"Erro ao consultar Jira: {type(e).__name__}: {e}")
-        raise
-    return {"pend": pend, "agnd": agnd, "tec": tec}
+def _endereco_bloco(ch: dict) -> List[str]:
+    iso_link = ISO_DESKTOP_URL if _is_desktop(ch.get("pdv"), ch.get("ativo")) else ISO_PDV_URL
+    iso_label = "Desktop" if _is_desktop(ch.get("pdv"), ch.get("ativo")) else "do PDV"
+    return [
+        f"Endereço: {ch.get('endereco','--')}",
+        f"Estado: {ch.get('estado','--')}",
+        f"CEP: {ch.get('cep','--')}",
+        f"Cidade: {ch.get('cidade','--')}",
+        "------",
+        "⚠️ *É OBRIGATÓRIO LEVAR:*",
+        f"• ISO ({iso_label}) ({iso_link})",
+        f"• RAT: ({RAT_URL})",
+    ]
 
-def agrupar_por_loja(issues: list) -> dict:
-    return jira.agrupar_chamados(issues)
+def gerar_mensagem_por_loja(loja: str, chamados: Iterable[dict]) -> str:
+    chamados = list(chamados)
+    blocos: List[str] = []
+    for ch in chamados:
+        linhas = [
+            f"*{ch.get('key','--')}*",
+            f"Loja: {loja}",
+            f"PDV: {ch.get('pdv','--')}",
+            f"*ATIVO: {ch.get('ativo','--')}*",
+            f"Problema: {ch.get('problema','--')}",
+            "***",
+        ]
+        blocos.append("\n".join(linhas))
+    ref = next((c for c in reversed(chamados) if any(c.get(k) for k in ("endereco","estado","cep","cidade"))), None)
+    if ref:
+        blocos.append("\n".join(_endereco_bloco(ref)))
+    return "\n\n".join(blocos)
 
-def agendados_por_data_loja(issues: list) -> dict:
-    by_date = defaultdict(lambda: defaultdict(list))
-    for issue in issues:
-        f = issue.get("fields", {})
-        loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-        data = parse_dt(f.get("customfield_12036"))
-        by_date[data][loja].append(issue)
-    return by_date
+def group_by_date(issues: Iterable[dict]) -> dict[str, List[dict]]:
+    out: dict[str, List[dict]] = {}
+    for it in issues:
+        d = _fmt_iso_date(it.get("data_agendada")) or _fmt_iso_date(it.get("created")) or "Sem data"
+        out.setdefault(d, []).append(it)
+    return out
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Sidebar: desfazer e agendamento/transição em lote
-# ──────────────────────────────────────────────────────────────────────────────
-def sidebar_transicoes(pendentes_raw, agendados_raw):
-    with st.sidebar:
-        st.header("Ações")
+def group_by_store(issues: Iterable[dict]) -> dict[str, List[dict]]:
+    out: dict[str, List[dict]] = {}
+    for it in issues:
+        loja = it.get("loja") or "Loja Desconhecida"
+        out.setdefault(loja, []).append(it)
+    return out
 
-        if st.button("↩️ Desfazer última ação"):
-            if st.session_state.history:
-                action = st.session_state.history.pop()
-                reverted = 0
-                for key in action["keys"]:
-                    trans = jira.get_transitions(key)
-                    rev_id = next(
-                        (t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]),
-                        None
-                    )
-                    if rev_id and jira.transicionar_status(key, rev_id).status_code == 204:
-                        reverted += 1
-                st.success(f"Revertido: {reverted} FSAs → {action['from']}")
-                st.cache_data.clear()
+def _badge(text: str) -> str:
+    return f"<span style='background:#111827;padding:4px 8px;border-radius:8px;font-weight:600;font-size:12px;color:#E5E7EB'>{text}</span>"
+
+
+# ============================
+# SIDEBAR: CREDENCIAIS (opcional)
+# ============================
+with st.sidebar:
+    st.header("Conexão Jira (opcional)")
+    st.caption("Preencha para buscar dados reais. Em branco = usa dados de exemplo.")
+    url = st.text_input("URL do Jira", value=st.session_state.get("jira_url", os.getenv("JIRA_URL","")))
+    email = st.text_input("E‑mail", value=st.session_state.get("jira_email", os.getenv("JIRA_EMAIL","")))
+    token = st.text_input("API Token", type="password", value=st.session_state.get("jira_token", os.getenv("JIRA_API_TOKEN","")))
+    col = st.columns(2)
+    with col[0]:
+        if st.button("Salvar sessão"):
+            st.session_state["jira_url"] = url
+            st.session_state["jira_email"] = email
+            st.session_state["jira_token"] = token
+            st.success("Credenciais guardadas nesta sessão.")
+    with col[1]:
+        if st.button("Testar conexão Jira (/myself)"):
+            if url and email and token:
+                try:
+                    who = JiraAPI(email, token, url).whoami()
+                    st.success(f"Conectado como: {who.get('displayName') or who.get('emailAddress') or 'OK'}")
+                except Exception as e:
+                    st.error(f"Falhou: {e}")
             else:
-                st.info("Nenhuma ação para desfazer.")
+                st.warning("Preencha URL / e‑mail / token para testar.")
 
-        st.markdown("---")
-        st.header("Transição em Lote")
+# ============================
+# CARGA DE DADOS
+# ============================
+@st.cache_data(show_spinner=True, ttl=180)
+def carregar(url: str, email: str, token: str) -> dict[str, list]:
+    """Busca no Jira; se faltar credencial, retorna amostra local."""
+    def _norm(xs: list) -> list:
+        return [JiraAPI.normalizar_issue(i) for i in xs]
 
-        lojas = sorted(
-            set(jira.agrupar_chamados(pendentes_raw).keys())
-            | set(jira.agrupar_chamados(agendados_raw).keys())
-        )
-        loja_sel = st.selectbox("Loja:", ["—"] + lojas)
-        if loja_sel == "—":
-            return
+    # sem credenciais => dados fake
+    if not (url and email and token):
+        sample = [
+            {
+                "key": "FSA-99901", "status": "AGENDAMENTO", "created": "2025-08-10T09:00:00.000+0000",
+                "loja": "L296", "pdv": "309", "ativo": "CPU", "problema": "Tela preta",
+                "endereco": "AV. TESTE 1000", "estado": "SP", "cep": "01000-000", "cidade": "São Paulo",
+                "data_agendada": None,
+            },
+            {
+                "key": "FSA-99902", "status": "AGENDADO", "created": "2025-08-10T10:00:00.000+0000",
+                "loja": "L174", "pdv": "300", "ativo": "Desktop", "problema": "Sem boot",
+                "endereco": "RUA TESTE 200", "estado": "BA", "cep": "40000-000", "cidade": "Salvador",
+                "data_agendada": "2025-08-11T13:00:00.000+0000",
+            },
+            {
+                "key": "FSA-99903", "status": "TEC-CAMPO", "created": "2025-08-09T10:00:00.000+0000",
+                "loja": "L296", "pdv": "305", "ativo": "CPU", "problema": "Reboot constante",
+                "endereco": "AV. TESTE 1000", "estado": "SP", "cep": "01000-000", "cidade": "São Paulo",
+                "data_agendada": "2025-08-12T09:00:00.000+0000",
+            },
+        ]
+        return {"agendamento": [sample[0]], "agendado": [sample[1]], "tec": [sample[2]]}
 
-        keys_pend = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
-        keys_agnd = [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
-        all_keys  = sorted(set(keys_pend + keys_agnd))
+    # com credenciais => Jira real
+    cli = JiraAPI(email, token, url)
+    agendamento = _norm(cli.buscar_chamados(JQLS["agendamento"], FIELDS))
+    agendado    = _norm(cli.buscar_chamados(JQLS["agendado"],    FIELDS))
+    tec         = _norm(cli.buscar_chamados(JQLS["tec"],          FIELDS))
+    return {"agendamento": agendamento, "agendado": agendado, "tec": tec}
 
-        st.subheader("Agendamento Rápido")
-        data = st.date_input("Data")
-        hora = st.time_input("Hora", value=time(9, 0))
-        tecnico = st.text_input("Dados do Técnico (Nome-CPF-RG-TEL)")
-        sem_tecnico = st.checkbox("Sem técnico (atribuir Técnico Fictício e apenas agendar)")
+# Botão de refresh
+rcol = st.columns([1,3,6])[0]
+if rcol.button("🔄 Atualizar agora"):
+    st.cache_data.clear()
+    st.rerun()
 
-        if st.button(f"Agendar e mover {len(all_keys)} FSAs → Tec‑Campo"):
-            if not data or not hora:
-                st.warning("Informe data e hora.")
-                return
+# Carrega
+DATA = carregar(
+    st.session_state.get("jira_url", url),
+    st.session_state.get("jira_email", email),
+    st.session_state.get("jira_token", token),
+)
 
-            dt_iso = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
-            extra_ag = {"customfield_12036": dt_iso}
-            if tecnico:
-                extra_ag["customfield_12279"] = {
-                    "type": "doc", "version": 1,
-                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}]
-                }
+# ============================
+# UI PRINCIPAL
+# ============================
+st.title("Painel Field Service")
+st.caption(
+    f"Links: ISO Desktop: {ISO_DESKTOP_URL} • ISO PDV: {ISO_PDV_URL} • RAT: {RAT_URL}"
+)
 
-            erros = []
+tab1, tab2, tab3 = st.tabs(["AGENDAMENTO", "AGENDADO", "TEC‑CAMPO"])
 
-            # 1) Agendar pendentes
-            for k in keys_pend:
-                trans = jira.get_transitions(k)
-                agid = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
-                if agid:
-                    r = jira.transicionar_status(k, agid, fields=extra_ag)
-                    if r.status_code != 204:
-                        erros.append(f"{k}⏳{r.status_code}")
-
-            # 2) Se sem técnico e não preencheu 'tecnico', gravamos um texto no campo
-            if sem_tecnico and not tecnico:
-                extra_attr = {
-                    "customfield_12279": {
-                        "type": "doc", "version": 1,
-                        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Técnico Fictício (Sem técnico)"}]}]
-                    }
-                }
-                for k in all_keys:
-                    _ = jira.transicionar_status(k, None, fields=extra_attr)
-
-            # 3) Mover todos para Tec‑Campo
-            moved = 0
-            for k in all_keys:
-                trans = jira.get_transitions(k)
-                tcid = next((t["id"] for t in trans if "tec-campo" in t.get("to", {}).get("name", "").lower()), None)
-                if tcid:
-                    r = jira.transicionar_status(k, tcid)
-                    if r.status_code == 204:
-                        moved += 1
-                    else:
-                        erros.append(f"{k}➡️{r.status_code}")
-
-            if erros:
-                st.error("Erros:"); [st.code(e) for e in erros]
-            else:
-                st.success(f"{len(all_keys)} FSAs agendados e movidos → Tec‑Campo")
-                st.session_state.history.append({"keys": all_keys, "from": "AGENDADO"})
-                st.cache_data.clear()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Bloco reutilizável por loja
-# ──────────────────────────────────────────────────────────────────────────────
-def bloco_por_loja(loja: str, detalhes: list):
-    st.markdown("**FSAs:** " + ", ".join(d["key"] for d in detalhes))
-    st.code(
-        gerar_mensagem(
-            loja,
-            detalhes,
-            iso_desktop=ISO_DESKTOP_URL,
-            iso_pdv=ISO_PDV_URL,
-            rat_url=RAT_URL,
-            detect_desktop=is_desktop,
-        ),
-        language="text"
-    )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ──────────────────────────────────────────────────────────────────────────────
-st.title("📱 Painel Field Service")
-
-try:
-    data = carregar()
-except Exception:
-    st.stop()
-
-pendentes_raw = data["pend"]
-agendados_raw = data["agnd"]
-tec_raw       = data["tec"]
-
-sidebar_transicoes(pendentes_raw, agendados_raw)
-
-tab1, tab2, tab3 = st.tabs(["⏳ Pendentes", "📋 Agendados", "🛠️ Tec‑Campo"])
+def _desenhar(chamados: list, rotulo: str):
+    por_data = group_by_date(chamados)
+    for data_str in sorted(por_data.keys()):
+        itens_dia = por_data[data_str]
+        badge = _badge(rotulo)
+        with st.expander(f"{data_str} — {len(itens_dia)} chamado(s)  {badge}", expanded=False):
+            por_loja = group_by_store(itens_dia)
+            for loja, dets in sorted(por_loja.items(), key=lambda x: x[0]):
+                st.markdown(f"**Loja {loja}** — FSAs: " + ", ".join(d['key'] for d in dets))
+                st.code(gerar_mensagem_por_loja(loja, dets), language="text")
 
 with tab1:
-    st.subheader("Chamados PENDENTES de Agendamento")
-    if not pendentes_raw:
-        st.warning("Nenhum chamado em AGENDAMENTO.")
-    else:
-        agrup_pend = agrupar_por_loja(pendentes_raw)
-        for loja, iss in sorted(agrup_pend.items()):
-            with st.expander(f"{loja} — {len(iss)} chamado(s)", expanded=False):
-                bloco_por_loja(loja, iss)
+    _desenhar(DATA["agendamento"], "AGENDAMENTO")
 
 with tab2:
-    st.subheader("Chamados AGENDADOS")
-    if not agendados_raw:
-        st.info("Nenhum chamado em AGENDADO.")
-    else:
-        grouped_sched = agendados_por_data_loja(agendados_raw)
-        for date, stores in sorted(grouped_sched.items()):
-            total = sum(len(v) for v in stores.values())
-            st.markdown(f"### {date} — {total} chamado(s)")
-            for loja, iss in sorted(stores.items()):
-                detalhes = agrupar_por_loja(iss)[loja]
-                dup_keys = [d["key"] for d in detalhes if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
-                spare_raw = jira.buscar_chamados(
-                    f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = {loja}', FIELDS
-                )
-                spare_keys = [i["key"] for i in spare_raw]
-                tags = []
-                if spare_keys: tags.append("Spare: " + ", ".join(spare_keys))
-                if dup_keys:   tags.append("Dup: " + ", ".join(dup_keys))
-                tag_str = f" [{' • '.join(tags)}]" if tags else ""
-                with st.expander(f"{loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
-                    bloco_por_loja(loja, detalhes)
+    _desenhar(DATA["agendado"], "AGENDADO")
 
 with tab3:
-    st.subheader("Chamados TEC‑CAMPO")
-    if not tec_raw:
-        st.info("Nenhum chamado em TEC‑CAMPO.")
-    else:
-        agrup_tec = agrupar_por_loja(tec_raw)
-        for loja, iss in sorted(agrup_tec.items()):
-            with st.expander(f"{loja} — {len(iss)} chamado(s)", expanded=False):
-                bloco_por_loja(loja, iss)
-
-st.markdown("---")
-st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+    _desenhar(DATA["tec"], "TEC-CAMPO")
