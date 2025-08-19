@@ -9,7 +9,7 @@ def is_desktop(ativo: str | None, pdv: str | int | None) -> bool:
       - PDV numérico >= 300 => Desktop
       - Ou se o texto do ativo contiver "desktop"
     """
-    if isinstance(pdv, (int,)) and pdv >= 300:
+    if isinstance(pdv, int) and pdv >= 300:
         return True
     if isinstance(pdv, str):
         s = pdv.strip()
@@ -24,7 +24,7 @@ def gerar_mensagem(loja: str, chamados: List[Dict]) -> str:
     """
     Gera mensagem por loja para envio (WhatsApp/Teams/Email).
     NÃO inclui tipo de atendimento nem status (pedido recente).
-    A ISO é tratada na tela (não aqui).
+    A ISO e RAT são tratados na tela.
     """
     blocos: List[str] = []
     ref_end = None
