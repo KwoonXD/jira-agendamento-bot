@@ -1,83 +1,83 @@
 # utils/messages.py
+# -*- coding: utf-8 -*-
+"""
+Geração de mensagem por loja + verificação de duplicidade.
+
+Compatível com Python 3.11 (sem walrus operator dentro de comprehensions, etc.).
+"""
 
 ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
-ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
-RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYys0ya0fKImVd74Lhn/view?usp=sharing"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDLT3kDDMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
 
-def _fmt_endereco(ch: dict) -> list[str]:
-    return [
-        f"Endereço: {ch.get('endereco','--')}",
-        f"Estado: {ch.get('estado','--')}",
-        f"CEP: {ch.get('cep','--')}",
-        f"Cidade: {ch.get('cidade','--')}",
+def _is_pdv(ch: dict) -> bool:
+    """PDV 300+ é PDV; se 'Desktop' aparece no ativo, tratamos como Desktop."""
+    pdv = str(ch.get("pdv", "")).strip()
+    ativo = str(ch.get("ativo", "")).lower()
+    try:
+        pdv_num = int(pdv)
+    except Exception:
+        pdv_num = -1
+    return pdv_num >= 300 and "desktop" not in ativo
+
+
+def _bloco_endereco(ch: dict) -> list[str]:
+    """Bloco final com endereço + links ISO/RAT (ISO por tipo)."""
+    iso = ISO_PDV_URL if _is_pdv(ch) else ISO_DESKTOP_URL
+    iso_label = "ISO (do PDV)" if _is_pdv(ch) else "ISO (Desktop)"
+
+    linhas = [
+        f"Endereço: {ch.get('endereco', '--')}",
+        f"Estado: {ch.get('estado', '--')}",
+        f"CEP: {ch.get('cep', '--')}",
+        f"Cidade: {ch.get('cidade', '--')}",
+        "------",
+        "⚠️ *É OBRIGATÓRIO LEVAR:*",
+        f"• {iso_label} ({iso})",
+        f"• RAT: ({RAT_URL})",
     ]
-
-
-def _has_spare(ch: dict) -> bool:
-    a = (ch.get("ativo") or "").upper()
-    return "SPARE" in a or "SP" in a
+    return linhas
 
 
 def gerar_mensagem(loja: str, chamados: list[dict]) -> str:
     """
-    Mensagem final por loja.
-    - Não inclui 'Status' nem 'Tipo de atendimento', conforme seu pedido.
-    - ISO entra na seção "É OBRIGATÓRIO LEVAR".
-    - RAT sempre no final.
-    - Se PDV == 300 OU ativo contém 'desktop' -> trata como Desktop para ISO.
-    - Marca SPARE e DUPLICADO.
+    Gera a mensagem (um bloco por chamado) e adiciona o endereço/links apenas 1x ao final.
+    Sem status e sem data, como você pediu anteriormente.
     """
-    blocos: list[str] = []
+    linhas: list[str] = []
+    for ch in chamados:
+        linhas.extend(
+            [
+                f"*{ch.get('key', '--')}*",
+                f"Loja: {loja}",
+                f"PDV: {ch.get('pdv', '--')}",
+                f"*ATIVO:* {ch.get('ativo', '--')}",
+                f"Problema: {ch.get('problema', '--')}",
+                "***",
+            ]
+        )
 
-    # duplicidade: (pdv, ativo)
-    seen = set()
-    dups = set()
-    for c in chamados:
-        key = (str(c.get("pdv")), str(c.get("ativo")).strip().lower())
-        if key in seen:
-            dups.add(key)
-        else:
-            seen.add(key)
-
-    for c in chamados:
-        warn = []
-        if _has_spare(c):
-            warn.append("SPARE")
-        key = (str(c.get("pdv")), str(c.get("ativo")).strip().lower())
-        if key in dups:
-            warn.append("DUPLICADO")
-
-        header = f"*{c.get('key','--')}*"
-        if warn:
-            header += "  " + " | ".join(f"[{w}]" for w in warn)
-
-        linhas = [
-            header,
-            f"Loja: {loja}",
-            f"PDV: {c.get('pdv','--')}",
-            f"*ATIVO:* {c.get('ativo','--')}",
-            f"Problema: {c.get('problema','--')}",
-            "***"
-        ]
-        blocos.append("\n".join(linhas))
-
-    # endereço (1 vez) — pego do último com dados
-    ref = next((x for x in reversed(chados := chamados) if any(x.get(k) for k in ("endereco","estado","cep","cidade"))), None)  # noqa: F841
+    # Endereço uma única vez: pega o último chamado que tenha pelo menos um dos campos.
+    ref = None
+    for c in reversed(chados := chamados):  # NÃO usar o valor 'chados' depois; só para manter a ordem
+        if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade")):
+            ref = c
+            break
     if ref:
-        blocos.append("\n".join(_fmt_endereco(ref)))
+        linhas.extend(_bloco_endereco(ref))
 
-    # Bloco de obrigatórios
-    # Define ISO pela presença de Desktop no ativo OU PDV == 300
-    tem_desktop = any(("DESKTOP" in str(x.get("ativo","")).upper()) or str(x.get("pdv")) == "300" for x in chamados)
-    iso_link = ISO_DESKTOP_URL if tem_desktop else ISO_PDV_URL
+    return "\n".join(linhas)
 
-    obrig = [
-        "------",
-        "⚠️ *É OBRIGATÓRIO LEVAR:*",
-        f"* ISO (do PDV) ({iso_link})",
-        f"* RAT: ({RAT_URL})"
-    ]
-    blocos.append("\n".join(obrig))
 
-    return "\n\n".join(blocos)
+def verificar_duplicidade(chamados: list[dict]) -> set[tuple[str, str]]:
+    """Retorna pares (pdv, ativo) que se repetem."""
+    vistos = set()
+    dups = set()
+    for ch in chamados:
+        chave = (str(ch.get("pdv")), str(ch.get("ativo")))
+        if chave in vistos:
+            dups.add(chave)
+        else:
+            vistos.add(chave)
+    return dups
