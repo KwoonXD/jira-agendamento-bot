@@ -1,79 +1,90 @@
-# Links padrão (pode trocar depois)
+# utils/messages.py
+from __future__ import annotations
+from datetime import datetime
+from typing import Iterable, List, Tuple
+
+# === Links padrão (edite se necessário) ======================================
 ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
 ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
 RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
+# ============================================================================
 
-def _fmt_endereco(ch: dict) -> list[str]:
+
+def _fmt_iso_datetime(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
+        except Exception:
+            pass
+    return None
+
+
+def _is_desktop(pdv: str, ativo: str) -> bool:
+    """Desktop se PDV == '300' ou texto do ativo contém 'desktop'."""
+    pdv = str(pdv or "").strip()
+    ativo = str(ativo or "").lower()
+    return pdv == "300" or ("desktop" in ativo)
+
+
+def _endereco_bloco(ch: dict) -> List[str]:
     return [
         f"Endereço: {ch.get('endereco','--')}",
         f"Estado: {ch.get('estado','--')}",
         f"CEP: {ch.get('cep','--')}",
         f"Cidade: {ch.get('cidade','--')}",
+        "------",
+        "⚠️ *É OBRIGATÓRIO LEVAR:*",
+        f"• ISO ({'Desktop' if _is_desktop(ch.get('pdv'), ch.get('ativo')) else 'do PDV'}) "
+        f"({ISO_DESKTOP_URL if _is_desktop(ch.get('pdv'), ch.get('ativo')) else ISO_PDV_URL})",
+        f"• RAT: ({RAT_URL})",
     ]
 
-def gerar_mensagem(
-    loja: str,
-    chamados: list[dict],
-    iso_desktop: str = ISO_DESKTOP_URL,
-    iso_pdv: str = ISO_PDV_URL,
-    rat_url: str = RAT_URL,
-    detect_desktop=None,
-) -> str:
-    """
-    Mensagem para o técnico (sem Status/Tipo).
-    - Por FSA: key, Loja, PDV, ATIVO, Problema.
-    - Endereço: uma vez no final.
-    - "É obrigatório levar": ISO Desktop e/ou ISO PDV conforme detecção.
-    - RAT no final.
-    """
-    blocos = []
-    precisa_desktop = False
-    precisa_pdv = False
 
+def gerar_mensagem_por_loja(loja: str, chamados: Iterable[dict]) -> str:
+    """
+    Gera a mensagem compacta por loja, sem status/tipo/ data_agendada na
+    parte do chamado. Os links ISO/RAT vêm após o endereço (uma vez).
+    """
+    chamados = list(chamados)
+    blocos: List[str] = []
+    # monta os chamados
     for ch in chamados:
-        if callable(detect_desktop):
-            if detect_desktop(ch):
-                precisa_desktop = True
-            else:
-                precisa_pdv = True
-
         linhas = [
             f"*{ch.get('key','--')}*",
             f"Loja: {loja}",
             f"PDV: {ch.get('pdv','--')}",
             f"*ATIVO: {ch.get('ativo','--')}*",
             f"Problema: {ch.get('problema','--')}",
-            "***"
+            "***",
         ]
         blocos.append("\n".join(linhas))
 
-    # Endereço (pega do último chamado que tiver dados)
-    ref = None
-    for c in reversed(chamados):
-        if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade")):
-            ref = c
-            break
+    # endereço + ISO/RAT uma vez (usa o último chamado que tiver endereço)
+    ref = next((c for c in reversed(chamados) if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade"))), None)
     if ref:
-        blocos.append("\n".join(_fmt_endereco(ref)))
+        blocos.append("\n".join(_endereco_bloco(ref)))
 
-    obrig = []
-    if precisa_desktop:
-        obrig.append(f"- [ISO Desktop]({iso_desktop})")
-    if precisa_pdv:
-        obrig.append(f"- [ISO PDV]({iso_pdv})")
-    if obrig:
-        blocos.append("**É obrigatório levar:**\n" + "\n".join(obrig))
-
-    blocos.append(f"**RAT:** {rat_url}")
     return "\n\n".join(blocos)
 
-def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
-    seen = {}
-    duplicates = set()
-    for ch in chamados:
-        key = (ch.get("pdv"), ch.get("ativo"))
-        if key in seen:
-            duplicates.add(key)
-        else:
-            seen[key] = True
-    return duplicates
+
+def group_by_date(issues: Iterable[dict]) -> dict[str, List[dict]]:
+    """
+    Agrupa por data (prioriza `data_agendada`; senão `created`).
+    Usa formato dd/mm/aaaa.
+    """
+    out: dict[str, List[dict]] = {}
+    for it in issues:
+        d = _fmt_iso_datetime(it.get("data_agendada")) or _fmt_iso_datetime(it.get("created")) or "Sem data"
+        out.setdefault(d, []).append(it)
+    return out
+
+
+def group_by_store(issues: Iterable[dict]) -> dict[str, List[dict]]:
+    """Agrupa por campo normalizado 'loja'."""
+    out: dict[str, List[dict]] = {}
+    for it in issues:
+        loja = it.get("loja") or "Loja Desconhecida"
+        out.setdefault(loja, []).append(it)
+    return out
