@@ -1,80 +1,93 @@
 from datetime import datetime
-from collections import defaultdict
+from typing import Iterable
 
-# Links fixos
-ISO_PDV_URL = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
-RAT_URL     = "https://drive.google.com/file/d/1_SG1RofIj0JLgwWYS0ya0fKLmVd74Lhn/view?usp=sharing"
 
-def _fmt_data(raw: str | None) -> str:
-    if not raw:
-        return "Sem data"
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+# Links (padrões – mude se quiser)
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
+
+
+def fmt_data_br(iso: str | None) -> str:
+    if not iso:
+        return "--"
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
+            return datetime.strptime(iso, fmt).strftime("%d/%m/%Y %H:%M")
         except Exception:
-            pass
-    return "Sem data"
+            continue
+    return iso
 
-def _fmt_endereco(c: dict) -> list[str]:
-    return [
-        f"Endereço: {c.get('endereco','--')}",
-        f"Estado: {c.get('estado','--')}",
-        f"CEP: {c.get('cep','--')}",
-        f"Cidade: {c.get('cidade','--')}",
-        "------",
-        "⚠️ *É OBRIGATÓRIO LEVAR:*",
-        f"• ISO (do PDV) ({ISO_PDV_URL})",
-        f"• RAT: ({RAT_URL})"
-    ]
 
-def is_spare(ativo: str) -> bool:
-    a = (ativo or "").upper()
-    return "SPARE" in a or "RESERVA" in a
-
-def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
-    seen = {}
-    dups = set()
-    for ch in chamados:
-        key = (str(ch.get("pdv","")).strip(), str(ch.get("ativo","")).strip().upper())
-        if key in seen:
-            dups.add(key)
-        else:
-            seen[key] = True
-    return dups
-
-def agrupar_por_data(chamados: list[dict]) -> dict[str, list[dict]]:
-    grp = defaultdict(list)
-    for ch in chamados:
-        grp[_fmt_data(ch.get("data_agendada"))].append(ch)
-    return dict(sorted(grp.items(), key=lambda kv: kv[0]))
-
-def gerar_mensagem_whatsapp(loja: str, chamados: list[dict]) -> str:
+def is_desktop(pdv: str, ativo: str) -> bool:
     """
-    Gera o bloco de mensagem por LOJA, com ISO/RAT no final e sem mostrar status.
-    Marca SPARE e DUPLICADO em cada chamado.
+    Regras pedidas:
+      - 'todo chamado que for PDV 300 é Desktop'
+      - ou que apareça 'Desktop' em ativos
     """
-    linhas = []
-    dups = verificar_duplicidade(chamados)
+    try:
+        if int(str(pdv).strip()) == 300:
+            return True
+    except Exception:
+        pass
+    return "DESKTOP" in str(ativo).upper()
 
+
+def gerar_mensagem_whatsapp(loja: str, chamados: Iterable[dict]) -> str:
+    """
+    Mensagem por loja (sem 'Status' e sem 'Tipo de atendimento'),
+    com bloco 'É OBRIGATÓRIO LEVAR' ao final (ISO + RAT).
+    """
+    chamados = list(chamados)
+    blocos: list[str] = []
+
+    # 1) Cabeça por FSA
     for ch in chamados:
-        pdv = ch.get("pdv","--")
-        ativo = ch.get("ativo","--")
-        spare = " ⚙️SPARE" if is_spare(ativo) else ""
-        dup   = " 🔁DUPLICADO" if (str(pdv).strip(), str(ativo).strip().upper()) in dups else ""
-
-        linhas.extend([
-            f"*{ch.get('key','--')}*{spare}{dup}",
-            f"Loja: {loja}",
-            f"PDV: {pdv}",
-            f"*ATIVO: {ativo}*",
+        linhas = [
+            f"*{ch.get('key','--')}*",
+            f"Loja: {ch.get('loja','--')}",
+            f"PDV: {ch.get('pdv','--')}",
+            f"*ATIVO: {ch.get('ativo','--')}*",
             f"Problema: {ch.get('problema','--')}",
-            "***",
-            ""
-        ])
+            "***"
+        ]
+        blocos.append("\n".join(linhas))
 
-    # endereço uma vez (pega do último com endereço não-vazio)
-    ref = next((c for c in reversed(chamados) if any(c.get(k) for k in ("endereco","estado","cep","cidade"))), None)
+    # 2) Endereço (uma vez no fim, pegando o que tiver informação)
+    ref = next((c for c in reversed(chamados)
+                if any(c.get(k) not in (None, "", "--") for k in ("endereco", "estado", "cep", "cidade"))),
+               None)
     if ref:
-        linhas.extend(_fmt_endereco(ref))
+        blocos.append("\n".join([
+            f"Endereço: {ref.get('endereco','--')}",
+            f"Estado: {ref.get('estado','--')}",
+            f"CEP: {ref.get('cep','--')}",
+            f"Cidade: {ref.get('cidade','--')}",
+            "------",
+        ]))
 
-    return "\n".join(linhas).strip()
+    # 3) Bloco obrigatório (ISO + RAT)
+    #    Escolhe ISO por Desktop/PDV analisando TODOS os chamados da loja:
+    any_desktop = any(is_desktop(c.get("pdv",""), c.get("ativo","")) for c in chamados)
+    iso_url = ISO_DESKTOP_URL if any_desktop else ISO_PDV_URL
+    blocos.append(
+        "\n".join([
+            "⚠️ *É OBRIGATÓRIO LEVAR:*",
+            f"• ISO ({'Desktop' if any_desktop else 'do PDV'}) ({iso_url})",
+            f"• RAT: ({RAT_URL})"
+        ])
+    )
+
+    return "\n".join(blocos)
+
+
+def encontrar_duplicados(chamados: Iterable[dict]) -> set[tuple]:
+    seen = set()
+    dup = set()
+    for ch in chamados:
+        k = ch.get("dup_key")
+        if k in seen:
+            dup.add(k)
+        else:
+            seen.add(k)
+    return dup
