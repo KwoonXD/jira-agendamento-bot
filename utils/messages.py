@@ -1,70 +1,86 @@
-# utils/messages.py
-from __future__ import annotations
-from typing import Dict, List, Tuple, Set
+# Links padrão (pode trocar depois)
+ISO_DESKTOP_URL = "https://drive.google.com/file/d/1GQ64blQmysK3rbM0s0Xlot89bDNAbj5L/view?usp=drive_link"
+ISO_PDV_URL     = "https://drive.google.com/file/d/1vxfHUDlT3kDdMaN0HroA5Nm9_OxasTaf/view?usp=drive_link"
+RAT_URL         = "https://drive.google.com/file/d/1_SG1RofIjoJLgwWYs0ya0fKlmVd74Lhn/view?usp=sharing"
 
+def _fmt_endereco(ch: dict) -> list[str]:
+    return [
+        f"Endereço: {ch.get('endereco','--')}",
+        f"Estado: {ch.get('estado','--')}",
+        f"CEP: {ch.get('cep','--')}",
+        f"Cidade: {ch.get('cidade','--')}",
+    ]
 
-def is_desktop(ativo: str | None, pdv: str | int | None) -> bool:
+def gerar_mensagem(
+    loja: str,
+    chamados: list[dict],
+    iso_desktop: str = ISO_DESKTOP_URL,
+    iso_pdv: str = ISO_PDV_URL,
+    rat_url: str = RAT_URL,
+    detect_desktop=None,
+) -> str:
     """
-    Regras combinadas:
-      - PDV numérico >= 300 => Desktop
-      - Ou se o texto do ativo contiver "desktop"
+    Monta a mensagem por loja para envio ao técnico.
+    Regras:
+      - NÃO incluir Status nem Tipo.
+      - Para cada FSA, listar: key, Loja, PDV, ATIVO, Problema.
+      - Endereço: uma única vez ao final do bloco dos FSAs.
+      - "É obrigatório levar:" — mostra **ISO Desktop** se for desktop, senão **ISO PDV**.
+        (Atenção: se houver mistura de tipos, mostra as duas linhas)
+      - RAT: link por último.
     """
-    if isinstance(pdv, int) and pdv >= 300:
-        return True
-    if isinstance(pdv, str):
-        s = pdv.strip()
-        if s.isdigit() and int(s) >= 300:
-            return True
-    if isinstance(ativo, str) and "desktop" in ativo.lower():
-        return True
-    return False
-
-
-def gerar_mensagem(loja: str, chamados: List[Dict]) -> str:
-    """
-    Gera mensagem por loja para envio (WhatsApp/Teams/Email).
-    NÃO inclui tipo de atendimento nem status (pedido recente).
-    A ISO e RAT são tratados na tela.
-    """
-    blocos: List[str] = []
-    ref_end = None
+    blocos = []
+    precisa_desktop = False
+    precisa_pdv = False
 
     for ch in chamados:
+        # detectar tipo
+        if callable(detect_desktop):
+            if detect_desktop(ch):
+                precisa_desktop = True
+            else:
+                precisa_pdv = True
+
         linhas = [
             f"*{ch.get('key','--')}*",
             f"Loja: {loja}",
             f"PDV: {ch.get('pdv','--')}",
             f"*ATIVO: {ch.get('ativo','--')}*",
             f"Problema: {ch.get('problema','--')}",
-            "***",
+            "***"
         ]
         blocos.append("\n".join(linhas))
 
-        if any(ch.get(k) for k in ("endereco", "estado", "cep", "cidade")):
-            ref_end = ch  # última referência com endereço válido
+    # Endereço (pega do último chamado que tiver dados)
+    ref = None
+    for c in reversed(chamados):
+        if any(c.get(k) for k in ("endereco", "estado", "cep", "cidade")):
+            ref = c
+            break
+    if ref:
+        blocos.append("\n".join(_fmt_endereco(ref)))
 
-    if ref_end:
-        blocos.append("\n".join([
-            f"Endereço: {ref_end.get('endereco','--')}",
-            f"Estado: {ref_end.get('estado','--')}",
-            f"CEP: {ref_end.get('cep','--')}",
-            f"Cidade: {ref_end.get('cidade','--')}",
-        ]))
+    # Obrigatório levar (ISO)
+    obrig = []
+    if precisa_desktop:
+        obrig.append(f"- [ISO Desktop]({iso_desktop})")
+    if precisa_pdv:
+        obrig.append(f"- [ISO PDV]({iso_pdv})")
+    if obrig:
+        blocos.append("**É obrigatório levar:**\n" + "\n".join(obrig))
+
+    # RAT (sempre no fim)
+    blocos.append(f"**RAT:** {rat_url}")
 
     return "\n\n".join(blocos)
 
-
-def verificar_duplicidade(chamados: List[Dict]) -> Set[Tuple[str | None, str | None]]:
-    """
-    Retorna tuplas (pdv, ativo) duplicadas dentro da coleção de chamados.
-    Útil para destacar potenciais duplicidades.
-    """
-    seen: set[Tuple[str | None, str | None]] = set()
-    dup: set[Tuple[str | None, str | None]] = set()
+def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
+    seen = {}
+    duplicates = set()
     for ch in chamados:
         key = (ch.get("pdv"), ch.get("ativo"))
         if key in seen:
-            dup.add(key)
+            duplicates.add(key)
         else:
-            seen.add(key)
-    return dup
+            seen[key] = True
+    return duplicates
