@@ -5,17 +5,21 @@ from datetime import datetime
 from typing import Dict, List
 
 import streamlit as st
-import requests
 
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
 
-# ---------------- Configuração visual básica ----------------
+# =========================
+# Configuração básica da página
+# =========================
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st.title("Painel Field Service")
 
-# ---------------- JQLs (ajuste se precisar) ----------------
+
+# =========================
+# JQLs – ajuste aqui se necessário
+# =========================
 JQLS = {
     "agendamento": "project = FSA AND status = AGENDAMENTO ORDER BY created DESC",
     "agendado":    "project = FSA AND status = Agendado ORDER BY created DESC",
@@ -23,60 +27,42 @@ JQLS = {
 }
 
 
-# ---------------- Sidebar: credenciais simples ---------------
-def _init_state():
-    ss = st.session_state
-    ss.setdefault("jira_url", "")
-    ss.setdefault("jira_email", "")
-    ss.setdefault("jira_token", "")
-    ss.setdefault("jira_ok", False)
-
-_init_state()
-
-with st.sidebar:
-    st.subheader("Credenciais Jira")
-    st.caption("Preencha e clique em **Usar credenciais**.")
-
-    st.text_input("Jira URL", key="jira_url", placeholder="https://seu-dominio.atlassian.net")
-    st.text_input("E-mail", key="jira_email", placeholder="seu-email@dominio")
-    st.text_input("Token", key="jira_token", type="password")
-
-    cols = st.columns(2)
-    with cols[0]:
-        if st.button("Usar credenciais", use_container_width=True):
-            st.session_state["jira_ok"] = bool(
-                st.session_state["jira_url"]
-                and st.session_state["jira_email"]
-                and st.session_state["jira_token"]
-            )
-    with cols[1]:
-        if st.button("Testar conexão", use_container_width=True):
-            try:
-                cli = JiraAPI(
-                    st.session_state["jira_url"],
-                    st.session_state["jira_email"],
-                    st.session_state["jira_token"],
-                )
-                me = cli.whoami()
-                st.success(f"Conectado como **{me.get('displayName','?')}**")
-            except Exception as e:
-                st.error(f"Falha: {e}")
-
-    if st.session_state["jira_ok"]:
-        st.success("Credenciais em uso.")
-    else:
-        st.warning("Aguardando credenciais.")
+# =========================
+# Carrega credenciais SOMENTE de st.secrets['jira']
+# =========================
+try:
+    JIRA_URL = st.secrets["jira"]["url"]
+    JIRA_EMAIL = st.secrets["jira"]["email"]
+    JIRA_TOKEN = st.secrets["jira"]["token"]
+except KeyError:
+    st.error("Credenciais do Jira não encontradas em `st.secrets['jira']`.")
+    st.stop()
 
 
-# --------------- Helpers de dados (simples) ------------------
-def _buscar(cli: JiraAPI, status_key: str) -> List[Dict]:
-    """Busca issues do Jira já normalizadas (usa utils.jira_api)."""
-    return cli.search_issues(JQLS[status_key])
+# =========================
+# Conexão com o Jira
+# =========================
+try:
+    jira = JiraAPI(JIRA_URL, JIRA_EMAIL, JIRA_TOKEN)
+    me = jira.whoami()
+    st.caption(f"Conectado ao Jira como **{me.get('displayName', JIRA_EMAIL)}**")
+except Exception as e:
+    st.error(f"Falha na conexão com o Jira: {e}")
+    st.stop()
+
+
+# =========================
+# Funções auxiliares de dados
+# =========================
+def _buscar(status_key: str) -> List[Dict]:
+    """Busca issues normalizadas (usa utils.jira_api)."""
+    return jira.search_issues(JQLS[status_key])
 
 
 def _agrupar_por_data(chamados: List[Dict]) -> Dict[str, List[Dict]]:
     grupos = defaultdict(list)
     for c in chamados:
+        # usa data_agendada se houver; senão created
         raw = c.get("data_agendada") or c.get("created")
         dia = "Sem data"
         if raw:
@@ -88,7 +74,7 @@ def _agrupar_por_data(chamados: List[Dict]) -> Dict[str, List[Dict]]:
                 except Exception:
                     pass
         grupos[dia].append(c)
-    # ordena com "Sem data" no fim
+    # Ordena por data, deixando "Sem data" por último
     return dict(sorted(grupos.items(), key=lambda kv: (kv[0] == "Sem data", kv[0])))
 
 
@@ -106,9 +92,9 @@ def _badge(txt: str, bg: str) -> str:
     )
 
 
-def _secao(cli: JiraAPI, status_key: str, cor: str) -> None:
+def _secao(status_key: str, cor: str) -> None:
     try:
-        chamados = _buscar(cli, status_key)
+        chamados = _buscar(status_key)
     except Exception as e:
         st.error(f"Falha ao carregar **{status_key.upper()}**: {e}")
         return
@@ -131,33 +117,31 @@ def _secao(cli: JiraAPI, status_key: str, cor: str) -> None:
 
         with st.expander(f"{dia} — {qtd} chamado(s)", expanded=False):
             for loja, itens in lojas.items():
+                # alerta de duplicidade (PDV, ATIVO)
                 dups = verificar_duplicidade(itens)
                 if dups:
                     texto = ", ".join([f"PDV {p or '--'} / ATIVO {a or '--'}" for (p, a) in dups])
                     st.warning(f"⚠️ Possíveis duplicidades: {texto}")
 
+                # FSAs listadas
                 st.caption("FSAs: " + ", ".join(d["key"] for d in itens))
+
+                # Mensagem padrão (com ISO e RAT no final), vinda do utils/messages.py
                 st.code(gerar_mensagem(loja, itens), language="text")
+
             st.divider()
 
 
-# --------------- UI principal (somente se logado) ------------
-if not st.session_state["jira_ok"]:
-    st.stop()
-
-cli = JiraAPI(
-    st.session_state["jira_url"],
-    st.session_state["jira_email"],
-    st.session_state["jira_token"],
-)
-
+# =========================
+# UI principal – abas
+# =========================
 tab1, tab2, tab3 = st.tabs(["AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
 
 with tab1:
-    _secao(cli, "agendamento", "#FFB84D")
+    _secao("agendamento", "#FFB84D")
 
 with tab2:
-    _secao(cli, "agendado", "#B7F7BD")
+    _secao("agendado", "#B7F7BD")
 
 with tab3:
-    _secao(cli, "tec", "#C6E4FF")
+    _secao("tec", "#C6E4FF")
