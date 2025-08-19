@@ -1,29 +1,29 @@
+# utils/export_utils.py
+from __future__ import annotations
+
+import io
 import pandas as pd
-from fpdf import FPDF
+import streamlit as st
+from typing import List, Dict
 
-def chamados_to_csv(chamados, filename="chamados_exportados.csv"):
+
+def exportar_para_excel(chamados: List[Dict], filename: str = "chamados.xlsx"):
+    """
+    Converte lista de dicts em Excel e mostra um botão de download no Streamlit.
+    """
+    if not chamados:
+        st.warning("Nada para exportar.")
+        return
+
     df = pd.DataFrame(chamados)
-    df.to_csv(filename, index=False)
-    return filename
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Chamados")
 
-
-def chamados_to_pdf(chamados, filename="chamados_exportados.pdf"):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-
-    for chamado in chamados:
-        pdf.multi_cell(0, 10,
-            f"Chamado: {chamado['key']}\n"
-            f"Loja: {chamado['loja']}\n"
-            f"PDV: {chamado['pdv']}\n"
-            f"Ativo: {chamado['ativo']}\n"
-            f"Problema: {chamado['problema']}\n"
-            f"Data Agendada: {chamado['data_agendada']}\n"
-            f"Endereço: {chamado['endereco']}\n"
-            f"Cidade: {chamado['cidade']} - {chamado['estado']} (CEP: {chamado['cep']})\n"
-            "--------------------------------------------"
-        )
-
-    pdf.output(filename)
-    return filename
+    st.download_button(
+        "⬇️ Download Excel",
+        data=buffer.getvalue(),
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
