@@ -1,170 +1,280 @@
-import os
-from collections import defaultdict
-from datetime import datetime
-import pytz
-import streamlit as st
+# streamlit_app.py
+from __future__ import annotations
 
+import uuid
+from datetime import datetime
+from collections import defaultdict
+
+import streamlit as st
 from utils.jira_api import JiraAPI
-from utils.messages import (
-    gerar_mensagem_whatsapp,
-    encontrar_duplicados,
-    ISO_DESKTOP_URL,
-    ISO_PDV_URL,
-    RAT_URL,
+from utils.messages import gerar_mensagem
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║ Config geral                                                             ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+st.set_page_config(page_title="Painel Field Service", layout="wide")
+
+# CSS global para polir o visual (cards, badges, tipografia)
+st.markdown(
+    """
+    <style>
+      /* fonte e espaçamento */
+      .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1250px;}
+      h1, h2, h3, h4 { letter-spacing: 0.2px; }
+
+      /* badge pill */
+      .pill {
+        display:inline-block; padding:4px 10px; border-radius:999px; font-weight:600; font-size:12px;
+        border:1px solid rgba(255,255,255,0.08)
+      }
+      .pill-pend { background:#2B1A00; color:#FFC266; }
+      .pill-agnd { background:#0D1F13; color:#74D680; }
+      .pill-tec  { background:#0D1A26; color:#6FA8DC; }
+
+      /* card */
+      .card {
+        border:1px solid rgba(255,255,255,.09);
+        background:rgba(255,255,255,.02);
+        border-radius:14px; padding:14px 16px; margin:10px 0 16px 0;
+      }
+      .card .muted {opacity:.7}
+      .kpi {
+        display:flex; gap:.75rem; align-items:center; font-size:12px; opacity:.85
+      }
+      .kpi b {font-size:13px;}
+      .head-row {display:flex; gap:8px; align-items:center; justify-content:space-between;}
+      .chip {
+        display:inline-block; padding:2px 8px; border-radius:8px; background:#1D2530; color:#B9C2CF;
+        border:1px solid rgba(255,255,255,.08); font-size:11px; margin-left:4px;
+      }
+
+      /* botão copiar */
+      .copy-btn {
+        font-size:12px; padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.12);
+        background:rgba(255,255,255,.03); cursor:pointer;
+      }
+      .copy-btn:hover { background:rgba(255,255,255,.06); }
+      .sep {height:10px}
+      details > summary { cursor: pointer; }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# —————————————————— CONFIG ——————————————————
-st.set_page_config(page_title="Painel Field Service", layout="wide", page_icon="🛠️")
-
-# Campos que buscamos no Jira (ajuste se necessário)
-FIELDS = [
-    "status",
-    "customfield_14954",  # Loja (option.value)
-    "customfield_14829",  # PDV
-    "customfield_14825",  # Ativo (option.value)
-    "customfield_12374",  # Problema
-    "customfield_12271",  # Endereço
-    "customfield_11948",  # Estado (option.value)
-    "customfield_11993",  # CEP
-    "customfield_11994",  # Cidade
-    "customfield_12036",  # Data agendada
-]
-
-# JQLs simples por status
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║ Definições e utilidades                                                  ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
 JQLS = {
     "agendamento": 'project = FSA AND status = "AGENDAMENTO"',
-    "agendado": 'project = FSA AND status = "AGENDADO"',
-    "tec": 'project = FSA AND status = "TEC-CAMPO"',
+    "agendado":    'project = FSA AND status = "AGENDADO"',
+    "teccampo":    'project = FSA AND status = "TEC-CAMPO"',
 }
-
-# —————————————————— SECRETS / CONEXÃO ——————————————————
-def get_jira_credentials():
-    # Preferir secrets (permanente)
-    if "jira" in st.secrets:
-        sec = st.secrets["jira"]
-        return sec.get("url"), sec.get("email"), sec.get("token")
-    # Fallback: variáveis de ambiente (opcional)
-    env = os.environ
-    if all(k in env for k in ("JIRA_URL", "JIRA_EMAIL", "JIRA_TOKEN")):
-        return env["JIRA_URL"], env["JIRA_EMAIL"], env["JIRA_TOKEN"]
-    # Sem nada -> avisa com instruções
-    st.error(
-        "Credenciais do Jira não encontradas em `st.secrets['jira']`.\n\n"
-        "Adicione no *App secrets* do Streamlit Cloud (ou `secrets.toml` local):\n\n"
-        "```toml\n[jira]\nurl = \"https://seu-dominio.atlassian.net\"\nemail = \"seu-email@dominio\"\ntoken = \"seu_api_token\"\n```\n"
-    )
-    st.stop()
+FIELDS = ",".join([
+    "status",
+    "customfield_14954",  # loja
+    "customfield_14829",  # PDV
+    "customfield_14825",  # Ativo
+    "customfield_12374",  # Problema
+    "customfield_12271",  # Endereço
+    "customfield_11948",  # Estado
+    "customfield_11993",  # CEP
+    "customfield_11994",  # Cidade
+    "customfield_12036",  # Data agendada (ISO string)
+])
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar():
-    url, email, token = get_jira_credentials()
-    cli = JiraAPI(url=url, email=email, token=token)
-    # Busca
-    agendamento_raw = cli.buscar_chamados(JQLS["agendamento"], FIELDS, max_results=250)
-    agendado_raw = cli.buscar_chamados(JQLS["agendado"], FIELDS, max_results=250)
-    tec_raw = cli.buscar_chamados(JQLS["tec"], FIELDS, max_results=250)
+    cli = JiraAPI()
+    me = cli.whoami()
+    pend = JiraAPI.normalize(cli.search(JQLS["agendamento"], FIELDS))
+    agnd = JiraAPI.normalize(cli.search(JQLS["agendado"], FIELDS))
+    tec  = JiraAPI.normalize(cli.search(JQLS["teccampo"], FIELDS))
+    return {"me": me, "agendamento": pend, "agendado": agnd, "teccampo": tec}
 
-    # Normaliza
-    agendamento = [cli.normalizar(i) for i in agendamento_raw]
-    agendado = [cli.normalizar(i) for i in agendado_raw]
-    tec = [cli.normalizar(i) for i in tec_raw]
 
+def agrupar_por_data(items: list[dict]) -> dict[str, list[dict]]:
+    groups = defaultdict(list)
+    for x in items:
+        raw = x.get("data_agendada_raw")
+        dt = raw[:10] if raw else datetime.now().strftime("%Y-%m-%d")
+        groups[dt].append(x)
+    # ordena por data
+    return dict(sorted(groups.items(), key=lambda kv: kv[0]))
+
+
+def agrupar_por_loja(items: list[dict]) -> dict[str, list[dict]]:
+    g = defaultdict(list)
+    for x in items:
+        g[str(x.get("loja", "--"))].append(x)
+    # ordena numericamente quando possível
+    def keyf(k):
+        try:
+            return int(k)
+        except Exception:
+            return 10**9
+    return dict(sorted(g.items(), key=lambda kv: keyf(kv[0])))
+
+
+def pill(label: str) -> str:
     return {
-        "agendamento": agendamento,
-        "agendado": agendado,
-        "tec": tec,
-    }
+        "AGENDAMENTO": "<span class='pill pill-pend'>PENDENTE</span>",
+        "AGENDADO":    "<span class='pill pill-agnd'>AGENDADO</span>",
+        "TEC-CAMPO":   "<span class='pill pill-tec'>TEC-CAMPO</span>",
+    }[label]
 
 
-# —————————————————— UI ——————————————————
-st.title("Painel Field Service")
-
-with st.sidebar:
-    st.subheader("Credenciais")
-    url, email, token = get_jira_credentials()
-    st.caption("Lendo de `st.secrets['jira']`.")
-    st.code(f"url={url}\nemail={email}", language="toml")
-    st.markdown("---")
-    st.markdown("**Links padrão**")
-    st.write(f"ISO Desktop: {ISO_DESKTOP_URL}")
-    st.write(f"ISO PDV: {ISO_PDV_URL}")
-    st.write(f"RAT: {RAT_URL}")
-
-# Carregar dados
-data = carregar()
-
-def agrupar_por_data_e_loja(chamados: list[dict]) -> dict[str, dict[str, list[dict]]]:
+def render_copy_button(text_to_copy: str, label: str = "Copiar mensagem"):
     """
-    -> { YYYY-MM-DD : { loja : [chamados...] } }
-    Data preferida: fields.customfield_12036 (data_agendada).
-    Se não tiver, usa a data atual só para não perder o grupo.
+    Injeta um botão HTML + JS para copiar para a área de transferência.
     """
-    tz = pytz.timezone("America/Sao_Paulo")
-    hoje = datetime.now(tz).strftime("%Y-%m-%d")
+    uid = f"copy_{uuid.uuid4().hex}"
+    html = f"""
+    <button class="copy-btn" onclick="
+      navigator.clipboard.writeText(document.getElementById('{uid}').innerText);
+      this.innerText='Copiado!';
+      setTimeout(()=>this.innerText='{label}',1200);
+    ">{label}</button>
+    <pre id="{uid}" style="white-space: pre-wrap; display:none;">{text_to_copy}</pre>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
-    agrup: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
-    for ch in chamados:
-        d = ch.get("data_agendada")
-        if isinstance(d, str) and len(d) >= 10:
-            key_date = d[:10]
+
+def contador_badges(pend: int, agnd: int, tec: int):
+    c1, c2, c3, c4 = st.columns([1,1,1,6])
+    c1.markdown(f"<span class='pill pill-pend'>PENDENTES: <b>{pend}</b></span>", unsafe_allow_html=True)
+    c2.markdown(f"<span class='pill pill-agnd'>AGENDADOS: <b>{agnd}</b></span>", unsafe_allow_html=True)
+    c3.markdown(f"<span class='pill pill-tec'>TEC-CAMPO: <b>{tec}</b></span>", unsafe_allow_html=True)
+    with c4:
+        if st.button("↻ Atualizar", use_container_width=False):
+            st.cache_data.clear()
+            st.rerun()
+
+
+def aplica_filtros(lista: list[dict], termo: str, somente_spare: bool, somente_dup: bool) -> list[dict]:
+    termo = (termo or "").strip().lower()
+    if not (termo or somente_spare or somente_dup):
+        return lista
+
+    # checa duplicidade por (pdv, ativo)
+    seen = set()
+    dups = set()
+    for c in lista:
+        key = (str(c.get("pdv")), str(c.get("ativo")).strip().lower())
+        if key in seen:
+            dups.add(key)
         else:
-            key_date = hoje
-        loja = str(ch.get("loja", "Loja"))
-        agrup[key_date][loja].append(ch)
-    return agrup
+            seen.add(key)
+
+    out = []
+    for c in lista:
+        text = " ".join([
+            str(c.get("key","")),
+            str(c.get("loja","")),
+            str(c.get("pdv","")),
+            str(c.get("ativo","")),
+            str(c.get("problema","")),
+            str(c.get("cidade","")),
+        ]).lower()
+
+        is_spare = "spare" in str(c.get("ativo","")).lower()
+        is_dup = (str(c.get("pdv")), str(c.get("ativo")).strip().lower()) in dups
+
+        if termo and termo not in text:
+            continue
+        if somente_spare and not is_spare:
+            continue
+        if somente_dup and not is_dup:
+            continue
+        out.append(c)
+    return out
 
 
-def render_coluna(titulo: str, chamados: list[dict]):
-    st.subheader(titulo)
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║ Cabeçalho                                                                ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+st.markdown("<h1>Painel Field Service</h1>", unsafe_allow_html=True)
+try:
+    data = carregar()
+    st.caption(f"Conectado como **{data['me'].get('displayName','?')}** — {datetime.now():%d/%m/%Y %H:%M}")
+except Exception as e:
+    st.error(str(e))
+    st.stop()
 
-    # Duplicados e Spare
-    dup_set = encontrar_duplicados(chamados)
+# KPIs de topo
+contador_badges(len(data["agendamento"]), len(data["agendado"]), len(data["teccampo"]))
 
-    agrup = agrupar_por_data_e_loja(chamados)
-    for data_dia in sorted(agrup.keys()):
-        grupos_loja = agrup[data_dia]
-        total = sum(len(v) for v in grupos_loja.values())
-        with st.expander(f"{datetime.strptime(data_dia, '%Y-%m-%d').strftime('%d/%m/%Y')} — {total} chamado(s)", expanded=False):
-            for loja in sorted(grupos_loja.keys(), key=lambda x: (len(x), x)):
-                dets = grupos_loja[loja]
+# Filtros globais
+with st.expander("Filtros"):
+    f1, f2, f3, f4 = st.columns([3,1.2,1.2,4])
+    termo = f1.text_input("Busca global", placeholder="loja, PDV, ativo, problema, chave...")
+    somente_spare = f2.toggle("Somente SPARE", value=False)
+    somente_dup = f3.toggle("Somente duplicados", value=False)
+    f4.caption("Dica: a busca combina vários campos e funciona em todas as abas.")
 
-                # badges
-                qtd_spare = sum(1 for d in dets if d.get("has_spare"))
-                qtd_dup = sum(1 for d in dets if d.get("dup_key") in dup_set)
-                badges = []
-                if qtd_spare:
-                    badges.append(f"🧩 {qtd_spare} c/ Spare")
-                if qtd_dup:
-                    badges.append(f"⚠️ {qtd_dup} duplicado(s)")
-                badge_txt = (" — " + " | ".join(badges)) if badges else ""
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║ Abas                                                                     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+tab1, tab2, tab3 = st.tabs(
+    [f"AGENDAMENTO", f"AGENDADO", f"TEC-CAMPO"]
+)
 
-                st.markdown(f"**{loja}** — {len(dets)} chamado(s){badge_txt}")
+def desenhar_aba(nome: str, items: list[dict]):
+    # Aplicar filtros globais
+    items_f = aplica_filtros(items, termo, somente_spare, somente_dup)
 
-                # Lista resumida
-                for d in dets:
-                    flags = []
-                    if d.get("has_spare"):
-                        flags.append("🧩 Spare")
-                    if d.get("dup_key") in dup_set:
-                        flags.append("⚠️ Duplicado")
-                    flags_txt = f" ({', '.join(flags)})" if flags else ""
-                    st.write(f"- {d['key']} | PDV {d['pdv']} | ATIVO {d['ativo']}{flags_txt}")
+    por_data = agrupar_por_data(items_f)
+    total = sum(len(v) for v in por_data.values())
+    st.markdown(f"<div class='kpi'><b>{total}</b> chamado(s) {pill(nome)}</div>", unsafe_allow_html=True)
 
-                # Mensagem “WhatsApp”
-                st.code(gerar_mensagem_whatsapp(loja, dets), language="text")
+    for dia, arr in por_data.items():
+        leg_data = datetime.strptime(dia, "%Y-%m-%d").strftime("%d/%m/%Y")
+        st.markdown(f"### {leg_data}  <span class='chip'> {len(arr)} chamados </span>", unsafe_allow_html=True)
 
+        # Dentro de cada dia, agrupar por loja
+        por_loja = agrupar_por_loja(arr)
+        for loja, chamados in por_loja.items():
+            msg = gerar_mensagem(loja, chamados)
 
-# —————————————————— ABAS ——————————————————
-tab1, tab2, tab3 = st.tabs(["AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
+            # Cabeçalho do card (loja e contagem)
+            st.markdown(
+                f"""
+                <div class='card'>
+                  <div class='head-row'>
+                    <div style="font-weight:700;">Loja {loja}</div>
+                    <div class='muted'>{len(chamados)} chamado(s)</div>
+                  </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # botões (copiar) + conteúdo colapsável
+            c_left, c_right = st.columns([6,1])
+            with c_left:
+                render_copy_button(msg, "Copiar mensagem")
+                st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+                with st.expander("Ver mensagem"):
+                    st.code(msg, language="text")
+            with c_right:
+                # mini-Resumo de ativos (extra gostosinho)
+                ativos = {}
+                for c in chamados:
+                    a = str(c.get("ativo","--")).upper()
+                    ativos[a] = ativos.get(a, 0) + 1
+                if ativos:
+                    st.markdown("**Ativos**")
+                    for k, v in sorted(ativos.items(), key=lambda x:-x[1]):
+                        st.caption(f"- {k}: {v}")
+
+            # fecha card
+            st.markdown("</div>", unsafe_allow_html=True)
 
 with tab1:
-    render_coluna("Chamados AGENDAMENTO", data["agendamento"])
-
+    desenhar_aba("AGENDAMENTO", data["agendamento"])
 with tab2:
-    render_coluna("Chamados AGENDADO", data["agendado"])
-
+    desenhar_aba("AGENDADO", data["agendado"])
 with tab3:
-    render_coluna("Chamados TEC-CAMPO", data["tec"])
+    desenhar_aba("TEC-CAMPO", data["teccampo"])
 
-st.caption(f"Atualizado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+st.caption(f"Atualizado em {datetime.now():%d/%m/%Y %H:%M}")
