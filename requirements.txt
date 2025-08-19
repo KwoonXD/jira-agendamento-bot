@@ -1,12 +1,5 @@
-streamlit
-streamlit-autorefresh
-pytz
-plotly
-streamlit-authenticator>=0.2.4
-pyyaml
-fpdf
 streamlit==1.48.0
-requests
-streamlit-sortables==0.3.1
-
-
+requests==2.32.5
+pyyaml==6.0.2
+pandas==2.3.1
+xlsxwriter==3.2.0
