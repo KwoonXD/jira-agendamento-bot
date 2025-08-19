@@ -58,15 +58,11 @@ class JiraAPI:
             try:
                 r.raise_for_status()
             except Exception:
-                # deixa o chamador decidir (mantemos o Response)
                 pass
         return r
 
     # ------------- Public API -------------
     def buscar_chamados(self, jql: str, fields: str, max_results: int = 1000) -> List[Dict[str, Any]]:
-        """
-        Faz paginação até 'max_results'. Retorna lista de issues (JSON bruto).
-        """
         issues: List[Dict[str, Any]] = []
         start = 0
         page_size = 100
@@ -88,10 +84,6 @@ class JiraAPI:
         return issues
 
     def agrupar_chamados(self, issues: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Consolida o necessário por loja.
-        Retorna: { loja: [ {key, status, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
-        """
         agrup: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for issue in issues:
             f = issue.get("fields", {}) or {}
