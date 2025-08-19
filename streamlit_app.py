@@ -1,228 +1,226 @@
 # streamlit_app.py
-# ------------------------------------------------------------
-# Painel Field Service (versão corrigida)
-# ------------------------------------------------------------
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from collections import defaultdict
+import os
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+
+import requests
+from requests.auth import HTTPBasicAuth
 
 import streamlit as st
 
-from utils.jira_api import JiraAPI
+# ======================================================================================
+# Fallbacks e utilitários
+# ======================================================================================
 
-try:
-    from utils.messages import gerar_mensagem, verificar_duplicidade
-except Exception:
-    def gerar_mensagem(loja: str, chamados: list) -> str:
-        linhas = [f"Loja {loja}", "------"]
-        for ch in chamados:
-            linhas.append(
-                "\n".join(
-                    [
-                        f"*{ch.get('key','--')}*",
-                        f"PDV: {ch.get('pdv','--')}",
-                        f"ATIVO: {ch.get('ativo','--')}",
-                        f"Problema: {ch.get('problema','--')}",
-                        "***",
-                    ]
-                )
-            )
-        return "\n".join(linhas)
+DEFAULT_JIRA_URL = "https://delfia.atlassian.net"  # mude se quiser outro padrão
 
-    def verificar_duplicidade(chamados: list) -> set[tuple]:
-        seen, dup = set(), set()
-        for ch in chamados:
-            k = (ch.get("pdv"), ch.get("ativo"))
-            if k in seen:
-                dup.add(k)
-            else:
-                seen.add(k)
-        return dup
 
+@dataclass
+class JiraCreds:
+    url: str
+    email: str
+    token: str
+
+
+def _toml_section_like(d: Dict[str, Any], section: str) -> Dict[str, Any]:
+    """Retorna d[section] se existir; caso contrário, d."""
+    if isinstance(d, dict) and section in d and isinstance(d[section], dict):
+        return d[section]
+    return d
+
+
+def _pick_first(*values: Optional[str]) -> Optional[str]:
+    for v in values:
+        if v and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def resolve_creds() -> Optional[JiraCreds]:
+    """
+    Resolve credenciais do Jira em várias fontes/formatações:
+    - st.secrets['jira'] (url/email/token)
+    - st.secrets (EMAIL, email, TOKEN, token, URL, url, jira_url, api_token)
+    - variáveis de ambiente (JIRA_URL, JIRA_EMAIL, JIRA_TOKEN)
+    - st.session_state['creds'] (digitado no sidebar)
+    - se url faltar, usa DEFAULT_JIRA_URL ou tenta inferir pelo domínio do email
+    """
+    # 1) st.secrets: aceita com ou sem [jira]
+    secrets_raw: Dict[str, Any] = dict(getattr(st, "secrets", {}))
+    secrets_flat = _toml_section_like(secrets_raw, "jira")
+
+    # Chaves possíveis
+    url = _pick_first(
+        secrets_flat.get("url"),
+        secrets_flat.get("URL"),
+        secrets_flat.get("jira_url"),
+        secrets_raw.get("url"),
+        secrets_raw.get("URL"),
+        secrets_raw.get("jira_url"),
+        os.getenv("JIRA_URL"),
+        os.getenv("jira_url"),
+    )
+    email = _pick_first(
+        secrets_flat.get("email"),
+        secrets_flat.get("EMAIL"),
+        secrets_raw.get("email"),
+        secrets_raw.get("EMAIL"),
+        os.getenv("JIRA_EMAIL"),
+        os.getenv("jira_email"),
+    )
+    token = _pick_first(
+        secrets_flat.get("token"),
+        secrets_flat.get("TOKEN"),
+        secrets_flat.get("api_token"),
+        secrets_raw.get("token"),
+        secrets_raw.get("TOKEN"),
+        secrets_raw.get("api_token"),
+        os.getenv("JIRA_TOKEN"),
+        os.getenv("jira_token"),
+        os.getenv("api_token"),
+    )
+
+    # 2) fallback vindo da sessão (digitado no sidebar anteriormente)
+    if st.session_state.get("creds_cache"):
+        sess = st.session_state["creds_cache"]
+        url = _pick_first(url, sess.get("url"))
+        email = _pick_first(email, sess.get("email"))
+        token = _pick_first(token, sess.get("token"))
+
+    # 3) Se ainda faltar URL, tenta inferir por domínio do e‑mail ou usa DEFAULT_JIRA_URL
+    if not url:
+        if email and "@" in email:
+            domain = email.split("@", 1)[-1]
+            # heurística comum do Jira Cloud: subdomínio = nome da empresa
+            # como fallback final, mantenho DEFAULT_JIRA_URL
+            url = DEFAULT_JIRA_URL
+        else:
+            url = DEFAULT_JIRA_URL
+
+    if email and token:
+        return JiraCreds(url=url, email=email, token=token)
+
+    return None
+
+
+# ======================================================================================
+# Cliente Jira direto (sem depender de utils) – simples para o teste de conexão
+# ======================================================================================
+
+class SimpleJira:
+    def __init__(self, url: str, email: str, token: str):
+        self.base_url = url.rstrip("/")
+        self.auth = HTTPBasicAuth(email, token)
+        self.headers = {"Accept": "application/json"}
+
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        r = requests.get(
+            f"{self.base_url}{path}",
+            auth=self.auth,
+            headers=self.headers,
+            params=params or {},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def whoami(self) -> Dict[str, Any]:
+        return self._get("/rest/api/3/myself")
+
+
+# ======================================================================================
+# UI
+# ======================================================================================
 
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st.title("Painel Field Service")
 
-FIELDS = ",".join(
-    [
-        "key",
-        "status",
-        "customfield_14954",
-        "customfield_14829",
-        "customfield_14825",
-        "customfield_12374",
-        "customfield_12271",
-        "customfield_11948",
-        "customfield_11993",
-        "customfield_11994",
-        "customfield_12036",
-    ]
-)
+with st.sidebar:
+    st.header("Credenciais")
+    st.caption(
+        "O app tenta carregar automaticamente de **st.secrets**, "
+        "**variáveis de ambiente** e **sessão**. "
+        "Se faltar algo, preencha abaixo para esta sessão."
+    )
 
-JQLS = {
-    "agendamento": 'project = FSA AND status = "AGENDAMENTO"',
-    "agendado": 'project = FSA AND status = "AGENDADO"',
-    "tec": 'project = FSA AND status = "TEC-CAMPO"',
-}
+    url_in = st.text_input("Jira URL (opcional)", value=DEFAULT_JIRA_URL)
+    email_in = st.text_input("E‑mail", value=st.session_state.get("creds_cache", {}).get("email", ""))
+    token_in = st.text_input("API Token", value=st.session_state.get("creds_cache", {}).get("token", ""), type="password")
+    col_btn = st.columns(2)
+    with col_btn[0]:
+        if st.button("Usar credenciais digitadas"):
+            st.session_state["creds_cache"] = {"url": url_in.strip(), "email": email_in.strip(), "token": token_in.strip()}
+            st.success("Credenciais armazenadas para esta sessão.")
 
+    with col_btn[1]:
+        if st.button("Limpar sessão"):
+            st.session_state.pop("creds_cache", None)
+            st.info("Sessão limpa.")
 
-def _show_missing_secrets_hint():
-    st.error("Credenciais do Jira não encontradas em st.secrets['jira']")
-    st.code(
-        "[jira]\nurl   = \"https://seu-dominio.atlassian.net\"\nemail = \"seu-email@dominio\"\ntoken = \"seu_api_token\"\n",
-        language="toml",
+# ======================================================================================
+# Carrega credenciais e testa conexão
+# ======================================================================================
+
+creds = resolve_creds()
+
+if not creds:
+    st.error(
+        "Credenciais não encontradas.\n\n"
+        "Configure **App secrets** com uma das opções:\n\n"
+        "```toml\n"
+        "[jira]\n"
+        'url = "https://delfia.atlassian.net"\n'
+        'email = "wt@parceiro.delfia.tech"\n'
+        'token = "seu_api_token"\n'
+        "```\n"
+        "ou defina as variáveis de ambiente `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`,\n"
+        "ou preencha no sidebar e clique em **Usar credenciais digitadas**."
     )
     st.stop()
 
+# Mostra o resumo de como ficou (sem exibir token)
+with st.expander("Credenciais em uso (resumo)"):
+    st.write(
+        {
+            "url": creds.url,
+            "email": creds.email,
+            "token": f"***{creds.token[-6:]}" if creds.token else None,
+            "origem": "secrets/env/sessão (auto)",
+        }
+    )
 
-def _read_secrets() -> dict:
-    jira = st.secrets.get("jira", None)
-    if isinstance(jira, dict):
-        url = jira.get("url")
-        email = jira.get("email")
-        token = jira.get("token")
-    else:
-        url = st.secrets.get("url")
-        email = st.secrets.get("email")
-        token = st.secrets.get("token")
-
-    if not url or not email or not token:
-        _show_missing_secrets_hint()
-
-    return {"url": url.rstrip("/"), "email": email, "token": token}
-
-
-@st.cache_resource(show_spinner=False)
-def jira_client() -> JiraAPI:
-    cred = _read_secrets()
-    try:
-        return JiraAPI(email=cred["email"], api_token=cred["token"], jira_url=cred["url"])
-    except TypeError:
-        try:
-            return JiraAPI(email=cred["email"], token=cred["token"], jira_url=cred["url"])
-        except TypeError:
-            return JiraAPI(cred["email"], cred["token"], cred["url"])
-
-
-def _normalizar(issue: dict) -> dict:
-    f = issue.get("fields", {})
-    loja = f.get("customfield_14954") or {}
-    estado = f.get("customfield_11948") or {}
-    return {
-        "key": issue.get("key", "--"),
-        "status": (f.get("status") or {}).get("name", "--"),
-        "loja": loja.get("value", "Loja"),
-        "pdv": f.get("customfield_14829") or "--",
-        "ativo": (f.get("customfield_14825") or {}).get("value", "--"),
-        "problema": f.get("customfield_12374") or "--",
-        "endereco": f.get("customfield_12271") or "--",
-        "estado": estado.get("value", "--"),
-        "cep": f.get("customfield_11993") or "--",
-        "cidade": f.get("customfield_11994") or "--",
-        "data_agendada": f.get("customfield_12036"),
-    }
-
-
-def _dia_str(iso_dt: str | None) -> str:
-    if not iso_dt:
-        return "Sem data"
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            d = datetime.strptime(iso_dt, fmt)
-            return d.strftime("%d/%m/%Y")
-        except Exception:
-            pass
-    return "Sem data"
-
-
-@st.cache_data(ttl=120, show_spinner=True)
-def carregar() -> dict[str, list[dict]]:
-    cli = jira_client()
-
-    def _buscar(jql: str) -> list[dict]:
-        raw = cli.buscar_chamados(jql, FIELDS)
-        return [_normalizar(it) for it in raw]
-
-    return {
-        "agendamento": _buscar(JQLS["agendamento"]),
-        "agendado": _buscar(JQLS["agendado"]),
-        "tec": _buscar(JQLS["tec"]),
-    }
-
-
-def _grupo_por_dia_e_loja(items: list[dict]) -> dict[str, dict[str, list[dict]]]:
-    g: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
-    for ch in items:
-        dia = _dia_str(ch.get("data_agendada"))
-        g[dia][ch["loja"]].append(ch)
-    return g
-
-
-def _badge(texto: str, cor_bg: str, cor_tx: str = "#00131B"):
-    return f"<span style='background:{cor_bg};padding:4px 8px;border-radius:8px;font-weight:600;font-size:12px;color:{cor_tx};'>{texto}</span>"
-
-
-def _expander_titulo(loja: str, chamados: list[dict]) -> str:
-    qtd = len(chamados)
-    qtd_pdv = sum(1 for c in chamados if str(c.get("pdv")).isdigit() and int(c.get("pdv")) >= 300)
-    qtd_desktop = qtd - qtd_pdv
-    return f"{loja} — {qtd} chamado(s) ({qtd_pdv} PDV · {qtd_desktop} Desktop)"
-
-
-def _bloco_loja(loja: str, chamados: list[dict]):
-    dups = verificar_duplicidade(chamados)
-    if dups:
-        msgs = [f"PDV {p or '--'} / ATIVO {a or '--'}" for (p, a) in dups]
-        st.warning("⚠️ Possíveis duplicidades: " + ", ".join(msgs))
-
-    st.markdown("**FSAs:** " + ", ".join(c["key"] for c in chamados))
-    st.code(gerar_mensagem(loja, chamados), language="text")
-
-
+# Teste de conexão
 try:
-    data = carregar()
+    jira = SimpleJira(creds.url, creds.email, creds.token)
+    who = jira.whoami()
+    st.success(f"Conectado ao Jira como **{who.get('displayName', creds.email)}**")
+except requests.HTTPError as e:
+    st.error(f"Falhou conectar ao Jira: {e}")
+    with st.expander("Detalhes do erro"):
+        st.exception(e)
+    st.stop()
 except Exception as e:
-    st.error(f"Falha ao carregar dados do Jira: {e}")
+    st.error(f"Erro inesperado ao conectar: {e}")
+    with st.expander("Detalhes do erro"):
+        st.exception(e)
     st.stop()
 
-tab_agdm, tab_agd, tab_tec = st.tabs(["AGENDAMENTO", "AGENDADO", "TEC-CAMPO"])
+# ======================================================================================
+# Se chegou aqui, conexão OK – coloque sua lógica/painéis
+# ======================================================================================
 
-with tab_agdm:
-    st.caption("Chamados com status **AGENDAMENTO**")
-    grupos = _grupo_por_dia_e_loja(data["agendamento"])
-    for dia in sorted(grupos.keys(), key=lambda s: datetime.strptime(s, "%d/%m/%Y") if s != "Sem data" else datetime.max):
-        lojas = grupos[dia]
-        header = f"{dia} — {sum(len(v) for v in lojas.values())} chamado(s) " + _badge("PENDENTE", "#FFB84D")
-        with st.expander(header, expanded=False):
-            for loja, itens in sorted(lojas.items()):
-                with st.container(border=True):
-                    st.markdown(f"##### { _expander_titulo(loja, itens) }")
-                    _bloco_loja(loja, itens)
+tab_agendamento, tab_agendado, tab_tec = st.tabs(["AGENDAMENTO", "AGENDADO", "TEC‑CAMPO"])
 
-with tab_agd:
-    st.caption("Chamados com status **AGENDADO**")
-    grupos = _grupo_por_dia_e_loja(data["agendado"])
-    for dia in sorted(grupos.keys(), key=lambda s: datetime.strptime(s, "%d/%m/%Y") if s != "Sem data" else datetime.max):
-        lojas = grupos[dia]
-        header = f"{dia} — {sum(len(v) for v in lojas.values())} chamado(s) " + _badge("AGENDADO", "#D6E8FF")
-        with st.expander(header, expanded=False):
-            for loja, itens in sorted(lojas.items()):
-                with st.container(border=True):
-                    st.markdown(f"##### { _expander_titulo(loja, itens) }")
-                    _bloco_loja(loja, itens)
+with tab_agendamento:
+    st.subheader("Chamados em AGENDAMENTO")
+    st.info("👉 Aqui você pode plugar sua busca por issues status = 'AGENDAMENTO'")
+
+with tab_agendado:
+    st.subheader("Chamados AGENDADOS")
+    st.info("👉 Aqui você pode plugar sua busca por issues status = 'AGENDADO'")
 
 with tab_tec:
-    st.caption("Chamados com status **TEC-CAMPO**")
-    grupos = _grupo_por_dia_e_loja(data["tec"])
-    for dia in sorted(grupos.keys(), key=lambda s: datetime.strptime(s, "%d/%m/%Y") if s != "Sem data" else datetime.max):
-        lojas = grupos[dia]
-        header = f"{dia} — {sum(len(v) for v in lojas.values())} chamado(s) " + _badge("TEC-CAMPO", "#FCF3F7")
-        with st.expander(header, expanded=False):
-            for loja, itens in sorted(lojas.items()):
-                with st.container(border=True):
-                    st.markdown(f"##### { _expander_titulo(loja, itens) }")
-                    _bloco_loja(loja, itens)
-
-st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+    st.subheader("Chamados TEC‑CAMPO")
+    st.info("👉 Aqui você pode plugar sua busca por issues status = 'TEC‑CAMPO'")
