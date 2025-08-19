@@ -1,58 +1,82 @@
 import requests
 from requests.auth import HTTPBasicAuth
 
+
 class JiraAPI:
     """
-    API enxuta para buscar issues do Jira Cloud (REST v3).
+    Cliente mínimo para Jira Cloud (API v3).
     """
-
-    def __init__(self, email: str, api_token: str, jira_url: str):
-        self.base = jira_url.rstrip("/")
-        self.auth = HTTPBasicAuth(email, api_token)
+    def __init__(self, url: str, email: str, token: str):
+        self.url = url.rstrip("/")
+        self.auth = HTTPBasicAuth(email, token)
         self.headers = {"Accept": "application/json"}
 
+    # ———— baixo nível ————
     def _get(self, path: str, params: dict | None = None) -> dict:
-        url = f"{self.base}{path}"
-        r = requests.get(url, auth=self.auth, headers=self.headers, params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        resp = requests.get(
+            f"{self.url}{path}",
+            headers=self.headers,
+            auth=self.auth,
+            params=params,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
-    def buscar_chamados(self, jql: str, fields: str, max_results: int = 200) -> list[dict]:
-        params = {"jql": jql, "fields": fields, "maxResults": max_results}
-        data = self._get("/rest/api/3/search", params=params)
+    # ———— alto nível ————
+    def buscar_chamados(self, jql: str, fields: list[str], max_results: int = 200) -> list[dict]:
+        data = self._get(
+            "/rest/api/3/search",
+            params={
+                "jql": jql,
+                "fields": ",".join(fields),
+                "maxResults": max_results,
+            },
+        )
         return data.get("issues", [])
 
-    # --------- Normalização (ajuste seus customfields aqui) ------------------
-    CF_LOJA        = "customfield_14954"  # -> option.value
-    CF_PDV         = "customfield_14829"  # -> texto/num
-    CF_ATIVO       = "customfield_14825"  # -> option.value
-    CF_PROBLEMA    = "customfield_12374"  # -> texto
-    CF_ENDERECO    = "customfield_12271"  # -> texto
-    CF_UF          = "customfield_11948"  # -> option.value
-    CF_CEP         = "customfield_11993"  # -> texto
-    CF_CIDADE      = "customfield_11994"  # -> texto
-    CF_DATA_AG     = "customfield_12036"  # -> string ISO com timezone
-
     def normalizar(self, issue: dict) -> dict:
-        f = issue.get("fields", {})
+        """
+        Converte a issue crua numa estrutura plana e resiliente.
+        Ajuste os customfield_* conforme o seu Jira.
+        """
+        f = issue.get("fields", {}) or {}
 
-        def opt(key):
-            val = f.get(key)
-            if isinstance(val, dict):
-                return val.get("value") or val.get("name")
-            return val
+        def _val(path, default="--"):
+            cur = f
+            for p in path.split("."):
+                cur = (cur or {}).get(p)
+            return cur if (cur is not None and cur != "") else default
 
-        status = f.get("status") or {}
+        # Campos customizados (troque se precisar)
+        loja = _val("customfield_14954.value", "Loja")
+        pdv = _val("customfield_14829", "--")
+        ativo = _val("customfield_14825.value", "--")
+        problema = _val("customfield_12374", "--")
+        endereco = _val("customfield_12271", "--")
+        estado = _val("customfield_11948.value", "--")
+        cep = _val("customfield_11993", "--")
+        cidade = _val("customfield_11994", "--")
+        dataag = f.get("customfield_12036")  # ISO 8601 ou None
+
+        # Heurísticas
+        has_spare = any(s in (str(problema).upper() + " " + str(ativo).upper())
+                        for s in ("SPARE", "PEÇA", "PECA", "PEÇAS"))
+        # chave de duplicidade
+        dup_key = (str(pdv).strip(), str(ativo).strip())
+
         return {
             "key": issue.get("key"),
-            "status": status.get("name", "--"),
-            "loja": opt(self.CF_LOJA) or "--",
-            "pdv": f.get(self.CF_PDV) or "--",
-            "ativo": opt(self.CF_ATIVO) or "--",
-            "problema": f.get(self.CF_PROBLEMA) or "--",
-            "endereco": f.get(self.CF_ENDERECO) or "--",
-            "estado": opt(self.CF_UF) or "--",
-            "cep": f.get(self.CF_CEP) or "--",
-            "cidade": f.get(self.CF_CIDADE) or "--",
-            "data_agendada": f.get(self.CF_DATA_AG),
+            "status": (f.get("status") or {}).get("name", "--"),
+            "loja": loja,
+            "pdv": pdv,
+            "ativo": ativo,
+            "problema": problema,
+            "endereco": endereco,
+            "estado": estado,
+            "cep": cep,
+            "cidade": cidade,
+            "data_agendada": dataag,
+            "has_spare": bool(has_spare),
+            "dup_key": dup_key,
         }
