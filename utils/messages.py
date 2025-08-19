@@ -20,21 +20,17 @@ def gerar_mensagem(
     detect_desktop=None,
 ) -> str:
     """
-    Monta a mensagem por loja para envio ao técnico.
-    Regras:
-      - NÃO incluir Status nem Tipo.
-      - Para cada FSA, listar: key, Loja, PDV, ATIVO, Problema.
-      - Endereço: uma única vez ao final do bloco dos FSAs.
-      - "É obrigatório levar:" — mostra **ISO Desktop** se for desktop, senão **ISO PDV**.
-        (Atenção: se houver mistura de tipos, mostra as duas linhas)
-      - RAT: link por último.
+    Mensagem para o técnico (sem Status/Tipo).
+    - Por FSA: key, Loja, PDV, ATIVO, Problema.
+    - Endereço: uma vez no final.
+    - "É obrigatório levar": ISO Desktop e/ou ISO PDV conforme detecção.
+    - RAT no final.
     """
     blocos = []
     precisa_desktop = False
     precisa_pdv = False
 
     for ch in chamados:
-        # detectar tipo
         if callable(detect_desktop):
             if detect_desktop(ch):
                 precisa_desktop = True
@@ -60,7 +56,6 @@ def gerar_mensagem(
     if ref:
         blocos.append("\n".join(_fmt_endereco(ref)))
 
-    # Obrigatório levar (ISO)
     obrig = []
     if precisa_desktop:
         obrig.append(f"- [ISO Desktop]({iso_desktop})")
@@ -69,9 +64,7 @@ def gerar_mensagem(
     if obrig:
         blocos.append("**É obrigatório levar:**\n" + "\n".join(obrig))
 
-    # RAT (sempre no fim)
     blocos.append(f"**RAT:** {rat_url}")
-
     return "\n\n".join(blocos)
 
 def verificar_duplicidade(chamados: list[dict]) -> set[tuple]:
