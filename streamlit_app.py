@@ -51,6 +51,13 @@ for i in pendentes_raw + agendados_raw:
     loja = i["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw_by_loja[loja].append(i)
 
+# ── 3.1) Lista robusta de lojas (evita StopIteration quando não há agendados) ──
+lojas_pend = set(agrup_pend.keys())
+lojas_ag = set()
+for _data, stores in grouped_sched.items():
+    lojas_ag |= set(stores.keys())
+todas_as_lojas = sorted(lojas_pend | lojas_ag)
+
 # ── Sidebar: Desfazer e Transição ──
 with st.sidebar:
     st.header("Ações")
@@ -73,9 +80,8 @@ with st.sidebar:
     st.markdown("---")
     st.header("Transição de Chamados")
 
-    # Seleciona loja
-    lojas = sorted(set(agrup_pend) | set(grouped_sched[next(iter(grouped_sched))].keys()))
-    loja_sel = st.selectbox("Selecione a loja:", ["—"] + lojas)
+    # Seleciona loja (sem StopIteration quando não há agendados)
+    loja_sel = st.selectbox("Selecione a loja:", ["—"] + todas_as_lojas)
 
     if loja_sel != "—":
         # Checkbox de fluxo completo
