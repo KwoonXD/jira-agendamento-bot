@@ -1,113 +1,73 @@
 # utils/jira_api.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-from collections import defaultdict
-
 import requests
-from requests.adapters import HTTPAdapter, Retry
+from requests.auth import HTTPBasicAuth
+from typing import Dict, List
 
 
-@dataclass(frozen=True)
-class JiraConfig:
-    email: str
-    api_token: str
-    url: str
-    timeout: int = 25
+FIELDS = ",".join([
+    "status",
+    "created",
+    "customfield_14954",  # Loja (cascading value / option)
+    "customfield_14829",  # PDV
+    "customfield_14825",  # Ativo (option)
+    "customfield_12374",  # Problema
+    "customfield_12271",  # Endereço
+    "customfield_11948",  # Estado (option)
+    "customfield_11993",  # CEP
+    "customfield_11994",  # Cidade
+    "customfield_12036",  # Data agendada (datetime)
+])
+
+JQLS = {
+    "agendamento": 'project = FSA AND status = "AGENDAMENTO"',
+    "agendado":    'project = FSA AND status = "AGENDADO"',
+    "tec":         'project = FSA AND status = "TEC-CAMPO"',
+}
 
 
 class JiraAPI:
-    """
-    Cliente simples e robusto para Jira Cloud v3.
-    - Sessão com retry/backoff
-    - Busca com paginação
-    - Métodos utilitários para transições
-    """
+    """Cliente simples para Jira Cloud API v3."""
 
-    def __init__(self, cfg: JiraConfig) -> None:
-        self.cfg = cfg
-        self.base = cfg.url.rstrip("/")
-        self.session = requests.Session()
-        self.session.auth = (cfg.email, cfg.api_token)
-        self.session.headers.update({
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
-        retries = Retry(
-            total=4,
-            read=4,
-            connect=4,
-            backoff_factor=0.6,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=frozenset(["GET", "POST"]),
-        )
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+    def __init__(self, email: str, api_token: str, base_url: str):
+        self.email = email
+        self.api_token = api_token
+        self.base_url = base_url.rstrip("/")
+        self._auth = HTTPBasicAuth(email, api_token)
+        self._headers = {"Accept": "application/json"}
 
-    # ------------- REST helpers -------------
-    def _get(self, path: str, **params) -> Dict[str, Any]:
-        r = self.session.get(f"{self.base}{path}", params=params, timeout=self.cfg.timeout)
+    def _get(self, path: str, params: Dict = None) -> dict:
+        url = f"{self.base_url}{path}"
+        r = requests.get(url, headers=self._headers, auth=self._auth, params=params or {}, timeout=20)
         r.raise_for_status()
         return r.json()
 
-    def _post(self, path: str, json: Dict[str, Any]) -> requests.Response:
-        r = self.session.post(f"{self.base}{path}", json=json, timeout=self.cfg.timeout)
-        # para transição, Jira retorna 204 sem body
-        if r.status_code >= 400:
-            try:
-                r.raise_for_status()
-            except Exception:
-                pass
-        return r
+    # -------- Public ---------------------------------------------------------
 
-    # ------------- Public API -------------
-    def buscar_chamados(self, jql: str, fields: str, max_results: int = 1000) -> List[Dict[str, Any]]:
-        issues: List[Dict[str, Any]] = []
-        start = 0
-        page_size = 100
+    def buscar_chamados(self, jql: str, fields: str = FIELDS, max_results: int = 200) -> List[dict]:
+        params = {"jql": jql, "fields": fields, "maxResults": max_results}
+        data = self._get("/rest/api/3/search", params=params)
+        return data.get("issues", [])
 
-        while start < max_results:
-            payload = self._get(
-                "/rest/api/3/search",
-                jql=jql,
-                fields=fields,
-                startAt=start,
-                maxResults=min(page_size, max_results - start),
-            )
-            chunk = payload.get("issues", [])
-            issues.extend(chunk)
-            if len(chunk) < page_size:
-                break
-            start += page_size
+    @staticmethod
+    def normalizar_issue(issue: dict) -> dict:
+        f = issue.get("fields", {})
+        loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
+        estado = (f.get("customfield_11948") or {}).get("value") or "--"
+        ativo = (f.get("customfield_14825") or {}).get("value") or "--"
 
-        return issues
-
-    def agrupar_chamados(self, issues: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        agrup: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for issue in issues:
-            f = issue.get("fields", {}) or {}
-            loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
-            agrup[loja].append({
-                "key": issue.get("key"),
-                "status": (f.get("status") or {}).get("name"),
-                "pdv": f.get("customfield_14829"),
-                "ativo": (f.get("customfield_14825") or {}).get("value"),
-                "problema": f.get("customfield_12374"),
-                "endereco": f.get("customfield_12271"),
-                "estado": (f.get("customfield_11948") or {}).get("value"),
-                "cep": f.get("customfield_11993"),
-                "cidade": f.get("customfield_11994"),
-                "data_agendada": f.get("customfield_12036"),
-            })
-        return agrup
-
-    def get_transitions(self, issue_key: str) -> List[Dict[str, Any]]:
-        data = self._get(f"/rest/api/3/issue/{issue_key}/transitions")
-        return data.get("transitions", []) or []
-
-    def transicionar_status(self, issue_key: str, transition_id: str, fields: Optional[Dict[str, Any]] = None) -> requests.Response:
-        payload: Dict[str, Any] = {"transition": {"id": str(transition_id)}}
-        if fields:
-            payload["fields"] = fields
-        return self._post(f"/rest/api/3/issue/{issue_key}/transitions", json=payload)
+        return {
+            "key": issue.get("key", "--"),
+            "status": (f.get("status") or {}).get("name") or "--",
+            "created": f.get("created"),             # ISO8601
+            "loja": loja,
+            "pdv": str(f.get("customfield_14829") or "--"),
+            "ativo": str(ativo),
+            "problema": str(f.get("customfield_12374") or "--"),
+            "endereco": str(f.get("customfield_12271") or "--"),
+            "estado": str(estado),
+            "cep": str(f.get("customfield_11993") or "--"),
+            "cidade": str(f.get("customfield_11994") or "--"),
+            "data_agendada": f.get("customfield_12036"),  # ISO8601
+        }
