@@ -1,137 +1,121 @@
 # utils/jira_api.py
-import time
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+from collections import defaultdict
+
 import requests
-from typing import List, Dict, Any, Optional
-from requests.auth import HTTPBasicAuth
+from requests.adapters import HTTPAdapter, Retry
+
+
+@dataclass(frozen=True)
+class JiraConfig:
+    email: str
+    api_token: str
+    url: str
+    timeout: int = 25
 
 
 class JiraAPI:
-    def __init__(self, email: str, api_token: str, jira_url: str, timeout: int = 25):
-        self.email = email
-        self.api_token = api_token
-        self.jira_url = jira_url.rstrip("/")
-        self.auth = HTTPBasicAuth(self.email, self.api_token)
-        self.headers = {
+    """
+    Cliente simples e robusto para Jira Cloud v3.
+    - Sessão com retry/backoff
+    - Busca com paginação
+    - Métodos utilitários para transições
+    """
+
+    def __init__(self, cfg: JiraConfig) -> None:
+        self.cfg = cfg
+        self.base = cfg.url.rstrip("/")
+        self.session = requests.Session()
+        self.session.auth = (cfg.email, cfg.api_token)
+        self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
-        }
-        self.timeout = timeout
+        })
+        retries = Retry(
+            total=4,
+            read=4,
+            connect=4,
+            backoff_factor=0.6,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET", "POST"]),
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
-    # ------------------- requisição com retry/backoff -------------------
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        json: Optional[Dict[str, Any]] = None,
-        max_retries: int = 3,
-        backoff_base: float = 0.8,
-    ) -> requests.Response:
-        url = f"{self.jira_url}{path}"
-        last_exc: Optional[Exception] = None
-        r = None
+    # ------------- REST helpers -------------
+    def _get(self, path: str, **params) -> Dict[str, Any]:
+        r = self.session.get(f"{self.base}{path}", params=params, timeout=self.cfg.timeout)
+        r.raise_for_status()
+        return r.json()
 
-        for attempt in range(1, max_retries + 1):
+    def _post(self, path: str, json: Dict[str, Any]) -> requests.Response:
+        r = self.session.post(f"{self.base}{path}", json=json, timeout=self.cfg.timeout)
+        # para transição, Jira retorna 204 sem body
+        if r.status_code >= 400:
             try:
-                r = requests.request(
-                    method,
-                    url,
-                    headers=self.headers,
-                    auth=self.auth,
-                    timeout=self.timeout,
-                    params=params,
-                    json=json,
-                )
+                r.raise_for_status()
+            except Exception:
+                # deixa o chamador decidir (mantemos o Response)
+                pass
+        return r
 
-                # rate limit
-                if r.status_code == 429:
-                    wait = float(r.headers.get("Retry-After", attempt * backoff_base))
-                    time.sleep(wait)
-                    continue
-
-                if r.status_code >= 400:
-                    try:
-                        payload = r.json()
-                    except Exception:
-                        payload = r.text
-                    msg = (
-                        f"Jira API HTTP {r.status_code} [{method} {path}] "
-                        f"params={params} json={json} payload={payload}"
-                    )
-                    r.raise_for_status()
-                return r
-
-            except requests.HTTPError as e:
-                last_exc = e
-                if r is not None and 400 <= r.status_code < 500 and r.status_code != 429:
-                    break
-                time.sleep(attempt * backoff_base)
-
-            except requests.RequestException as e:
-                last_exc = e
-                time.sleep(attempt * backoff_base)
-
-        raise requests.HTTPError(f"Falha ao chamar Jira após {max_retries} tentativas: {last_exc}")
-
-    # ------------------- busca paginada -------------------
+    # ------------- Public API -------------
     def buscar_chamados(self, jql: str, fields: str, max_results: int = 1000) -> List[Dict[str, Any]]:
-        path = "/rest/api/3/search"
-        start_at = 0
-        page_size = 100
+        """
+        Faz paginação até 'max_results'. Retorna lista de issues (JSON bruto).
+        """
         issues: List[Dict[str, Any]] = []
+        start = 0
+        page_size = 100
 
-        while len(issues) < max_results:
-            params = {
-                "jql": jql,
-                "startAt": start_at,
-                "maxResults": min(page_size, max_results - len(issues)),
-                "fields": fields,
-            }
-            r = self._request("GET", path, params=params)
-            data = r.json()
-
-            page_issues = data.get("issues", []) or []
-            issues.extend(page_issues)
-
-            if len(page_issues) == 0 or start_at + len(page_issues) >= data.get("total", 0):
+        while start < max_results:
+            payload = self._get(
+                "/rest/api/3/search",
+                jql=jql,
+                fields=fields,
+                startAt=start,
+                maxResults=min(page_size, max_results - start),
+            )
+            chunk = payload.get("issues", [])
+            issues.extend(chunk)
+            if len(chunk) < page_size:
                 break
-            start_at += len(page_issues)
+            start += page_size
 
         return issues
 
-    # ------------------- agrupar por loja -------------------
     def agrupar_chamados(self, issues: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        from collections import defaultdict
-        agrup = defaultdict(list)
+        """
+        Consolida o necessário por loja.
+        Retorna: { loja: [ {key, status, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
+        """
+        agrup: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for issue in issues:
-            f = issue.get("fields", {})
+            f = issue.get("fields", {}) or {}
             loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
             agrup[loja].append({
                 "key": issue.get("key"),
-                "status": (f.get("status") or {}).get("name", "--"),
-                "pdv": f.get("customfield_14829", "--"),
-                "ativo": (f.get("customfield_14825") or {}).get("value", "--"),
-                "problema": f.get("customfield_12374", "--"),
-                "endereco": f.get("customfield_12271", "--"),
-                "estado": (f.get("customfield_11948") or {}).get("value", "--"),
-                "cep": f.get("customfield_11993", "--"),
-                "cidade": f.get("customfield_11994", "--"),
+                "status": (f.get("status") or {}).get("name"),
+                "pdv": f.get("customfield_14829"),
+                "ativo": (f.get("customfield_14825") or {}).get("value"),
+                "problema": f.get("customfield_12374"),
+                "endereco": f.get("customfield_12271"),
+                "estado": (f.get("customfield_11948") or {}).get("value"),
+                "cep": f.get("customfield_11993"),
+                "cidade": f.get("customfield_11994"),
                 "data_agendada": f.get("customfield_12036"),
             })
         return agrup
 
-    # ------------------- transições -------------------
     def get_transitions(self, issue_key: str) -> List[Dict[str, Any]]:
-        r = self._request("GET", f"/rest/api/3/issue/{issue_key}/transitions")
-        return r.json().get("transitions", [])
-
-    def get_issue(self, issue_key: str) -> Dict[str, Any]:
-        r = self._request("GET", f"/rest/api/3/issue/{issue_key}", params={"fields": "status"})
-        return r.json()
+        data = self._get(f"/rest/api/3/issue/{issue_key}/transitions")
+        return data.get("transitions", []) or []
 
     def transicionar_status(self, issue_key: str, transition_id: str, fields: Optional[Dict[str, Any]] = None) -> requests.Response:
-        payload = {"transition": {"id": str(transition_id)}}
+        payload: Dict[str, Any] = {"transition": {"id": str(transition_id)}}
         if fields:
             payload["fields"] = fields
-        return self._request("POST", f"/rest/api/3/issue/{issue_key}/transitions", json=payload)
+        return self._post(f"/rest/api/3/issue/{issue_key}/transitions", json=payload)
