@@ -1,82 +1,88 @@
+# utils/jira_api.py
+from __future__ import annotations
+
 import requests
 from requests.auth import HTTPBasicAuth
+from typing import Dict, Any, List
 
 
 class JiraAPI:
     """
-    Cliente mínimo para Jira Cloud (API v3).
+    Cliente simplificado para Jira (Cloud - API v3).
+    Você inicializa com url, email e token, e usa search_issues(jql).
+    Retorna uma lista de dicionários já normalizados para o app.
     """
+
+    # Campos do Jira que usamos (IDs/nomes dos customfields que você já usa no seu projeto)
+    DEFAULT_FIELDS = ",".join([
+        "key",
+        "summary",
+        "status",
+        "created",
+        # —— customfields do seu projeto (ajuste se precisar) —
+        "customfield_14954",  # Loja (option/value)
+        "customfield_14829",  # PDV
+        "customfield_14825",  # ATIVO (option/value)
+        "customfield_12374",  # Problema (descrição curta)
+        "customfield_12271",  # Endereço
+        "customfield_11948",  # Estado (option/value)
+        "customfield_11993",  # CEP
+        "customfield_11994",  # Cidade
+        "customfield_12036",  # Data agendada (datetime)
+    ])
+
     def __init__(self, url: str, email: str, token: str):
-        self.url = url.rstrip("/")
+        self.base = url.rstrip("/")
         self.auth = HTTPBasicAuth(email, token)
         self.headers = {"Accept": "application/json"}
 
-    # ———— baixo nível ————
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        resp = requests.get(
-            f"{self.url}{path}",
-            headers=self.headers,
-            auth=self.auth,
-            params=params,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    # --------------- HTTP helpers ---------------
+    def _get(self, path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        url = f"{self.base}{path}"
+        r = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=25)
+        r.raise_for_status()
+        return r.json()
 
-    # ———— alto nível ————
-    def buscar_chamados(self, jql: str, fields: list[str], max_results: int = 200) -> list[dict]:
-        data = self._get(
-            "/rest/api/3/search",
-            params={
-                "jql": jql,
-                "fields": ",".join(fields),
-                "maxResults": max_results,
-            },
-        )
+    # --------------- API pública ---------------
+    def search_raw(self, jql: str, fields: str | None = None, max_results: int = 200) -> List[Dict[str, Any]]:
+        """Busca issues cruas do Jira (sem normalizar)."""
+        params = {
+            "jql": jql,
+            "maxResults": max_results,
+            "fields": fields or self.DEFAULT_FIELDS,
+        }
+        data = self._get("/rest/api/3/search", params=params)
         return data.get("issues", [])
 
-    def normalizar(self, issue: dict) -> dict:
-        """
-        Converte a issue crua numa estrutura plana e resiliente.
-        Ajuste os customfield_* conforme o seu Jira.
-        """
+    def search_issues(self, jql: str, fields: str | None = None, max_results: int = 200) -> List[Dict[str, Any]]:
+        """Busca e normaliza issues para o app."""
+        issues = self.search_raw(jql, fields, max_results)
+        return [self._normalize(i) for i in issues]
+
+    # --------------- Normalização ---------------
+    @staticmethod
+    def _opt(o: Any, key: str = "value", default: str = "--") -> str:
+        """Extrai o 'value' de um option/obj do Jira com fallback."""
+        if isinstance(o, dict):
+            v = o.get(key)
+            if v:
+                return str(v)
+        return default
+
+    def _normalize(self, issue: Dict[str, Any]) -> Dict[str, Any]:
         f = issue.get("fields", {}) or {}
 
-        def _val(path, default="--"):
-            cur = f
-            for p in path.split("."):
-                cur = (cur or {}).get(p)
-            return cur if (cur is not None and cur != "") else default
-
-        # Campos customizados (troque se precisar)
-        loja = _val("customfield_14954.value", "Loja")
-        pdv = _val("customfield_14829", "--")
-        ativo = _val("customfield_14825.value", "--")
-        problema = _val("customfield_12374", "--")
-        endereco = _val("customfield_12271", "--")
-        estado = _val("customfield_11948.value", "--")
-        cep = _val("customfield_11993", "--")
-        cidade = _val("customfield_11994", "--")
-        dataag = f.get("customfield_12036")  # ISO 8601 ou None
-
-        # Heurísticas
-        has_spare = any(s in (str(problema).upper() + " " + str(ativo).upper())
-                        for s in ("SPARE", "PEÇA", "PECA", "PEÇAS"))
-        # chave de duplicidade
-        dup_key = (str(pdv).strip(), str(ativo).strip())
-
         return {
-            "key": issue.get("key"),
-            "status": (f.get("status") or {}).get("name", "--"),
-            "loja": loja,
-            "pdv": pdv,
-            "ativo": ativo,
-            "problema": problema,
-            "endereco": endereco,
-            "estado": estado,
-            "cep": cep,
-            "cidade": cidade,
-            "data_agendada": dataag,
-            "has_spare": bool(has_spare),
-            "dup_key": dup_key,
+            "key": issue.get("key", "--"),
+            "status": (f.get("status", {}) or {}).get("name", "--"),
+            "created": f.get("created"),  # ISO 8601
+            "loja": self._opt(f.get("customfield_14954")),
+            "pdv": f.get("customfield_14829"),
+            "ativo": self._opt(f.get("customfield_14825")),
+            "problema": f.get("customfield_12374") or "--",
+            "endereco": f.get("customfield_12271") or "--",
+            "estado": self._opt(f.get("customfield_11948")),
+            "cep": f.get("customfield_11993") or "--",
+            "cidade": f.get("customfield_11994") or "--",
+            "data_agendada": f.get("customfield_12036"),  # ISO 8601 (ou None)
         }
