@@ -28,11 +28,11 @@ FIELDS = (
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
 )
 
-# ── Cargas ──
-pendentes_raw = jira.buscar_chamados("project = FSA AND status = AGENDAMENTO", FIELDS)
+# ── Cargas com debug snapshot independente ──
+pendentes_raw, dbg_pend = jira.buscar_chamados('project = FSA AND status = "AGENDAMENTO"', FIELDS)
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
-agendados_raw = jira.buscar_chamados("project = FSA AND status = AGENDADO", FIELDS)
+agendados_raw, dbg_ag = jira.buscar_chamados('project = FSA AND status = "AGENDADO"', FIELDS)
 grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
     f = issue["fields"]
@@ -50,7 +50,7 @@ for i in pendentes_raw + agendados_raw:
     loja = i["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw_by_loja[loja].append(i)
 
-# ── Lojas robusto (sem StopIteration) ──
+# ── Lojas robusto ──
 lojas_pend = set(agrup_pend.keys())
 lojas_ag = set()
 for _, stores in grouped_sched.items():
@@ -83,26 +83,36 @@ with st.sidebar:
 
     # ── Painel de DEBUG ──
     with st.expander("🛠️ Debug da API Jira", expanded=False):
-        st.caption("Use isto para verificar se há erro de autenticação/JQL/campos.")
+        st.caption("Autenticação, projetos visíveis e últimas JQLs.")
+
+        who, dbg_who = jira.whoami()
+        st.write("**/myself**")
+        st.json({"status": dbg_who.get("status"), "url": dbg_who.get("url"), "account": who})
+
+        projs, dbg_proj = jira.listar_projetos()
+        st.write("**/project/search (visíveis)**")
+        st.json({
+            "status": dbg_proj.get("status"),
+            "count": dbg_proj.get("count"),
+            "primeiros": [{"key": p.get("key"), "name": p.get("name")} for p in projs[:10]],
+        })
+
         st.write("**Pendentes**")
         st.json({
-            "jql": "project = FSA AND status = AGENDAMENTO",
-            "last_status": jira.last_status,
-            "last_url": jira.last_url,
-            "last_params": jira.last_params,
-            "last_error": jira.last_error,
-            "count": len(pendentes_raw),
+            "jql": dbg_pend.get("params", {}).get("jql"),
+            "status": dbg_pend.get("status"),
+            "url": dbg_pend.get("url"),
+            "error": dbg_pend.get("error"),
+            "count": dbg_pend.get("count"),
         })
+
         st.write("**Agendados**")
         st.json({
-            "jql": "project = FSA AND status = AGENDADO",
-            "count": len(agendados_raw),
-        })
-        st.write("**Lojas**")
-        st.json({
-            "pendentes": sorted(list(lojas_pend)),
-            "agendados": sorted(list(lojas_ag)),
-            "todas": todas_as_lojas,
+            "jql": dbg_ag.get("params", {}).get("jql"),
+            "status": dbg_ag.get("status"),
+            "url": dbg_ag.get("url"),
+            "error": dbg_ag.get("error"),
+            "count": dbg_ag.get("count"),
         })
 
     if loja_sel != "—":
@@ -253,8 +263,7 @@ with col2:
                     d["key"] for d in detalhes
                     if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)
                 ]
-                # >>> Loja entre aspas na JQL de Spare <<<
-                spare_raw = jira.buscar_chamados(
+                spare_raw, _dbg_spare = jira.buscar_chamados(
                     f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = "{loja}"',
                     FIELDS,
                 )
