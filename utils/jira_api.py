@@ -4,6 +4,10 @@ from collections import defaultdict
 
 
 class JiraAPI:
+    """
+    Wrapper simples para Jira Cloud API v3, com coleta de metadados de debug.
+    """
+
     def __init__(self, email: str, api_token: str, jira_url: str):
         self.email = email
         self.api_token = api_token
@@ -11,23 +15,56 @@ class JiraAPI:
         self.auth = HTTPBasicAuth(self.email, self.api_token)
         self.headers = {
             "Accept": "application/json",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
+
+        # campos de debug
+        self.last_status = None
+        self.last_error = None
+        self.last_url = None
+        self.last_params = None
+        self.last_count = None
+
+    def _reset_debug(self):
+        self.last_status = None
+        self.last_error = None
+        self.last_url = None
+        self.last_params = None
+        self.last_count = None
 
     def buscar_chamados(self, jql: str, fields: str) -> list:
         """
         Busca issues via JQL e retorna lista de issues.
+        Preenche campos de debug em self.* para inspeção no app.
         """
+        self._reset_debug()
         params = {
             "jql": jql,
             "maxResults": 100,
-            "fields": fields
+            "fields": fields,
         }
         url = f"{self.jira_url}/rest/api/3/search"
-        res = requests.get(url, headers=self.headers, auth=self.auth, params=params)
-        if res.status_code == 200:
-            return res.json().get("issues", [])
-        return []
+        self.last_url = url
+        self.last_params = params
+
+        try:
+            res = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+            self.last_status = res.status_code
+            if res.status_code == 200:
+                issues = res.json().get("issues", [])
+                self.last_count = len(issues)
+                return issues
+            else:
+                # guarda o body de erro para debug
+                try:
+                    self.last_error = res.json()
+                except Exception:
+                    self.last_error = res.text
+                return []
+        except requests.RequestException as e:
+            self.last_status = -1
+            self.last_error = str(e)
+            return []
 
     def agrupar_chamados(self, issues: list) -> dict:
         """
@@ -47,7 +84,7 @@ class JiraAPI:
                 "estado": f.get("customfield_11948", {}).get("value", "--"),
                 "cep": f.get("customfield_11993", "--"),
                 "cidade": f.get("customfield_11994", "--"),
-                "data_agendada": f.get("customfield_12036")
+                "data_agendada": f.get("customfield_12036"),
             })
         return agrup
 
@@ -63,10 +100,9 @@ class JiraAPI:
 
     def get_issue(self, issue_key: str) -> dict:
         """
-        Retorna JSON completo da issue (ou pelo menos os campos necessários como status).
+        Retorna JSON da issue (solicitando ao menos o status).
         """
         url = f"{self.jira_url}/rest/api/3/issue/{issue_key}"
-        # busca só o campo status para history
         res = requests.get(url, headers=self.headers, auth=self.auth, params={"fields": "status"})
         if res.status_code == 200:
             return res.json()
@@ -75,7 +111,7 @@ class JiraAPI:
     def transicionar_status(self, issue_key: str, transition_id: str, fields: dict = None) -> requests.Response:
         """
         Executa transição de status. Se campos forem fornecidos, inclui no payload.
-        Retorna o objeto Response para inspeção de status/erro.
+        Retorna o objeto Response para inspeção.
         """
         payload = {"transition": {"id": str(transition_id)}}
         if fields:
