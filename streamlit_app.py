@@ -16,10 +16,36 @@ if "history" not in st.session_state:
 
 # ── JiraAPI ──
 jira = JiraAPI(
-    st.secrets["EMAIL"],
-    st.secrets["API_TOKEN"],
+    st.secrets.get("EMAIL", ""),
+    st.secrets.get("API_TOKEN", ""),
     "https://delfia.atlassian.net",
 )
+
+# ── Guard de secrets ──
+if not jira.email or not jira.api_token:
+    st.error(
+        "⚠️ Secrets ausentes: configure `EMAIL` e `API_TOKEN` no **Secrets** do Streamlit.\n\n"
+        "Exemplo em *secrets.toml*:\n\n"
+        'EMAIL = "wt@parceiro.delfia.tech"\n'
+        'API_TOKEN = "seu_api_token_da_Atlassian"\n'
+    )
+    st.stop()
+
+# ── Verifica autenticação antes de qualquer JQL ──
+who, dbg_who = jira.whoami()
+if not who:
+    st.error(
+        "❌ **Falha de autenticação no Jira (/myself)**.\n\n"
+        f"- Status: `{dbg_who.get('status')}`\n"
+        f"- URL: `{dbg_who.get('url')}`\n"
+        f"- Erro: `{dbg_who.get('error')}`\n\n"
+        "Verifique:\n"
+        "1) O **e-mail** pertence a um usuário com acesso a **delfia.atlassian.net**;\n"
+        "2) O **API Token** foi gerado em https://id.atlassian.com/manage-profile/security/api-tokens ;\n"
+        "3) O usuário tem permissão **Browse projects** no projeto **FSA**;\n"
+        "4) O token foi colado corretamente nos **Secrets** e o app foi atualizado.\n"
+    )
+    st.stop()
 
 # ── Campos ──
 FIELDS = (
@@ -50,7 +76,7 @@ for i in pendentes_raw + agendados_raw:
     loja = i["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw_by_loja[loja].append(i)
 
-# ── Lojas robusto ──
+# ── Lojas ──
 lojas_pend = set(agrup_pend.keys())
 lojas_ag = set()
 for _, stores in grouped_sched.items():
@@ -78,25 +104,18 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Transição de Chamados")
-
     loja_sel = st.selectbox("Selecione a loja:", ["—"] + todas_as_lojas)
 
-    # ── Painel de DEBUG ──
     with st.expander("🛠️ Debug da API Jira", expanded=False):
-        st.caption("Autenticação, projetos visíveis e últimas JQLs.")
-
-        who, dbg_who = jira.whoami()
-        st.write("**/myself**")
-        st.json({"status": dbg_who.get("status"), "url": dbg_who.get("url"), "account": who})
-
         projs, dbg_proj = jira.listar_projetos()
+        st.write("**/myself (ok)**")
+        st.json({"accountId": who.get("accountId"), "displayName": who.get("displayName"), "emailAddress": jira.email})
         st.write("**/project/search (visíveis)**")
         st.json({
             "status": dbg_proj.get("status"),
             "count": dbg_proj.get("count"),
             "primeiros": [{"key": p.get("key"), "name": p.get("name")} for p in projs[:10]],
         })
-
         st.write("**Pendentes**")
         st.json({
             "jql": dbg_pend.get("params", {}).get("jql"),
@@ -105,7 +124,6 @@ with st.sidebar:
             "error": dbg_pend.get("error"),
             "count": dbg_pend.get("count"),
         })
-
         st.write("**Agendados**")
         st.json({
             "jql": dbg_ag.get("params", {}).get("jql"),
@@ -130,9 +148,7 @@ with st.sidebar:
                 extra_ag["customfield_12279"] = {
                     "type": "doc",
                     "version": 1,
-                    "content": [
-                        {"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}
-                    ],
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}],
                 }
 
             keys_pend = [
