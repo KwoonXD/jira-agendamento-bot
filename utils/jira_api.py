@@ -6,21 +6,20 @@ from typing import Tuple, Dict, Any, List
 
 class JiraAPI:
     """
-    Wrapper simples para Jira Cloud API v3, com coleta de metadados de debug
-    e utilitários para diagnóstico (whoami, listar_projetos).
+    Wrapper para Jira Cloud API v3 com utilitários de diagnóstico.
     """
 
     def __init__(self, email: str, api_token: str, jira_url: str):
         self.email = email
         self.api_token = api_token
-        self.jira_url = jira_url.rstrip('/')
+        self.jira_url = jira_url.rstrip("/")
         self.auth = HTTPBasicAuth(self.email, self.api_token)
         self.headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
 
-        # campos de debug (referentes à ÚLTIMA chamada)
+        # último snapshot (rápido)
         self.last_status = None
         self.last_error = None
         self.last_url = None
@@ -32,7 +31,8 @@ class JiraAPI:
     # ------------------------
     def whoami(self) -> Tuple[Dict[str, Any] | None, Dict[str, Any]]:
         """
-        Retorna (payload, debug) do endpoint /myself para conferir o usuário autenticado.
+        Confere o usuário autenticado.
+        Retorna (payload|None, debug).
         """
         url = f"{self.jira_url}/rest/api/3/myself"
         dbg = {"url": url}
@@ -53,7 +53,8 @@ class JiraAPI:
 
     def listar_projetos(self, max_results: int = 50) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Retorna (lista_de_projetos, debug) visíveis ao usuário/token.
+        Lista projetos visíveis ao usuário/token.
+        Retorna (lista, debug).
         """
         url = f"{self.jira_url}/rest/api/3/project/search"
         params = {"maxResults": max_results}
@@ -88,14 +89,9 @@ class JiraAPI:
 
     def buscar_chamados(self, jql: str, fields: str) -> Tuple[list, Dict[str, Any]]:
         """
-        Busca issues via JQL e retorna (issues, debug_snapshot).
-        O debug_snapshot congela os metadados dessa chamada específica.
+        Executa search JQL e retorna (issues, debug_snapshot).
         """
-        params = {
-            "jql": jql,
-            "maxResults": 100,
-            "fields": fields,
-        }
+        params = {"jql": jql, "maxResults": 100, "fields": fields}
         url = f"{self.jira_url}/rest/api/3/search"
 
         debug_snapshot: Dict[str, Any] = {
@@ -113,7 +109,6 @@ class JiraAPI:
                 issues = res.json().get("issues", [])
                 count = len(issues)
                 debug_snapshot.update({"status": status, "count": count})
-                # também atualiza "last_*" global (para inspeção rápida)
                 self._set_debug(url, params, status, None, count)
                 return issues, debug_snapshot
             else:
@@ -124,7 +119,6 @@ class JiraAPI:
                 debug_snapshot.update({"status": status, "error": err, "count": 0})
                 self._set_debug(url, params, status, err, 0)
                 return [], debug_snapshot
-
         except requests.RequestException as e:
             debug_snapshot.update({"status": -1, "error": str(e), "count": 0})
             self._set_debug(url, params, -1, str(e), 0)
@@ -132,8 +126,7 @@ class JiraAPI:
 
     def agrupar_chamados(self, issues: list) -> dict:
         """
-        Agrupa issues por customfield_14954 (loja):
-        { loja_value: [ {key, pdv, ativo, problema, endereco, estado, cep, cidade, data_agendada}, ... ] }
+        Agrupa issues por customfield_14954 (loja).
         """
         agrup = defaultdict(list)
         for issue in issues:
