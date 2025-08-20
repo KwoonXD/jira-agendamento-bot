@@ -1,44 +1,77 @@
+import base64
 import requests
 from requests.auth import HTTPBasicAuth
 from collections import defaultdict
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
 
 class JiraAPI:
     """
-    Wrapper para Jira Cloud API v3 com utilitários de diagnóstico.
+    Suporta dois modos:
+      • Domínio: https://<site>.atlassian.net/rest/api/3/...
+      • EX API : https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/...
+    Para token fine‑grained, use EX API (use_ex_api=True).
     """
 
-    def __init__(self, email: str, api_token: str, jira_url: str):
-        self.email = email
-        self.api_token = api_token
+    def __init__(
+        self,
+        email: str,
+        api_token: str,
+        jira_url: str,
+        use_ex_api: bool = False,
+        cloud_id: Optional[str] = None
+    ):
+        self.email = email.strip()
+        self.api_token = api_token.strip()
         self.jira_url = jira_url.rstrip("/")
-        self.auth = HTTPBasicAuth(self.email, self.api_token)
-        self.headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        self.use_ex_api = use_ex_api
+        self.cloud_id = cloud_id
 
-        # último snapshot (rápido)
+        self.auth = HTTPBasicAuth(self.email, self.api_token)
+        self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+        # debug da última chamada
         self.last_status = None
         self.last_error = None
         self.last_url = None
         self.last_params = None
         self.last_count = None
 
-    # ------------------------
-    # Helpers de diagnóstico
-    # ------------------------
+    # ---------- helpers ----------
+    def _base(self) -> str:
+        if self.use_ex_api:
+            if not self.cloud_id:
+                raise ValueError("cloud_id é obrigatório quando use_ex_api=True")
+            return f"https://api.atlassian.com/ex/jira/{self.cloud_id}/rest/api/3"
+        return f"{self.jira_url}/rest/api/3"
+
+    def _auth_headers(self) -> Dict[str, str]:
+        if not self.use_ex_api:
+            return {}
+        basic = f"{self.email}:{self.api_token}".encode("utf-8")
+        return {
+            "Authorization": "Basic " + base64.b64encode(basic).decode("ascii"),
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+    def _set_debug(self, url: str, params: Dict[str, Any], status: int, error: Any, count: int):
+        self.last_url = url
+        self.last_params = params
+        self.last_status = status
+        self.last_error = error
+        self.last_count = count
+
+    # ---------- diagnóstico ----------
     def whoami(self) -> Tuple[Dict[str, Any] | None, Dict[str, Any]]:
-        """
-        Confere o usuário autenticado.
-        Retorna (payload|None, debug).
-        """
-        url = f"{self.jira_url}/rest/api/3/myself"
-        dbg = {"url": url}
+        url = f"{self._base()}/myself"
+        hdr = self._auth_headers() or self.headers
         try:
-            r = requests.get(url, headers=self.headers, auth=self.auth)
-            dbg["status"] = r.status_code
+            if self.use_ex_api:
+                r = requests.get(url, headers=hdr)
+            else:
+                r = requests.get(url, headers=self.headers, auth=self.auth)
+            dbg = {"url": url, "status": r.status_code}
             if r.status_code == 200:
                 return r.json(), dbg
             try:
@@ -47,87 +80,51 @@ class JiraAPI:
                 dbg["error"] = r.text
             return None, dbg
         except requests.RequestException as e:
-            dbg["status"] = -1
-            dbg["error"] = str(e)
-            return None, dbg
+            return None, {"url": url, "status": -1, "error": str(e)}
 
-    def listar_projetos(self, max_results: int = 50) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """
-        Lista projetos visíveis ao usuário/token.
-        Retorna (lista, debug).
-        """
-        url = f"{self.jira_url}/rest/api/3/project/search"
-        params = {"maxResults": max_results}
-        dbg = {"url": url, "params": params}
+    def tenant_info(self) -> Tuple[Dict[str, Any] | None, Dict[str, Any]]:
+        url = f"{self.jira_url}/_edge/tenant_info"
         try:
-            r = requests.get(url, headers=self.headers, auth=self.auth, params=params)
-            dbg["status"] = r.status_code
+            r = requests.get(url, timeout=10)
+            dbg = {"url": url, "status": r.status_code}
             if r.status_code == 200:
-                data = r.json() or {}
-                values = data.get("values", [])
-                dbg["count"] = len(values)
-                return values, dbg
-            try:
-                dbg["error"] = r.json()
-            except Exception:
-                dbg["error"] = r.text
-            return [], dbg
+                return r.json(), dbg
+            dbg["error"] = r.text
+            return None, dbg
         except requests.RequestException as e:
-            dbg["status"] = -1
-            dbg["error"] = str(e)
-            return [], dbg
+            return None, {"url": url, "status": -1, "error": str(e)}
 
-    # ------------------------
-    # Core
-    # ------------------------
-    def _set_debug(self, url: str, params: Dict[str, Any], status: int, error: Any, count: int):
-        self.last_url = url
-        self.last_params = params
-        self.last_status = status
-        self.last_error = error
-        self.last_count = count
-
+    # ---------- Core ----------
     def buscar_chamados(self, jql: str, fields: str) -> Tuple[list, Dict[str, Any]]:
-        """
-        Executa search JQL e retorna (issues, debug_snapshot).
-        """
         params = {"jql": jql, "maxResults": 100, "fields": fields}
-        url = f"{self.jira_url}/rest/api/3/search"
-
-        debug_snapshot: Dict[str, Any] = {
-            "url": url,
-            "params": params.copy(),
-            "status": None,
-            "error": None,
-            "count": None,
-        }
+        url = f"{self._base()}/search"
+        debug = {"url": url, "params": params.copy(), "status": None, "error": None, "count": None}
 
         try:
-            res = requests.get(url, headers=self.headers, auth=self.auth, params=params)
-            status = res.status_code
+            if self.use_ex_api:
+                r = requests.get(url, headers=self._auth_headers(), params=params)
+            else:
+                r = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+            status = r.status_code
             if status == 200:
-                issues = res.json().get("issues", [])
-                count = len(issues)
-                debug_snapshot.update({"status": status, "count": count})
-                self._set_debug(url, params, status, None, count)
-                return issues, debug_snapshot
+                issues = r.json().get("issues", [])
+                debug.update({"status": status, "count": len(issues)})
+                self._set_debug(url, params, status, None, len(issues))
+                return issues, debug
             else:
                 try:
-                    err = res.json()
+                    err = r.json()
                 except Exception:
-                    err = res.text
-                debug_snapshot.update({"status": status, "error": err, "count": 0})
+                    err = r.text
+                debug.update({"status": status, "error": err, "count": 0})
                 self._set_debug(url, params, status, err, 0)
-                return [], debug_snapshot
+                return [], debug
         except requests.RequestException as e:
-            debug_snapshot.update({"status": -1, "error": str(e), "count": 0})
+            debug.update({"status": -1, "error": str(e), "count": 0})
             self._set_debug(url, params, -1, str(e), 0)
-            return [], debug_snapshot
+            return [], debug
 
     def agrupar_chamados(self, issues: list) -> dict:
-        """
-        Agrupa issues por customfield_14954 (loja).
-        """
         agrup = defaultdict(list)
         for issue in issues:
             f = issue.get("fields", {})
@@ -146,23 +143,38 @@ class JiraAPI:
         return agrup
 
     def get_transitions(self, issue_key: str) -> list:
-        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
-        res = requests.get(url, headers=self.headers, auth=self.auth)
-        if res.status_code == 200:
-            return res.json().get("transitions", [])
+        url = f"{self._base()}/issue/{issue_key}/transitions"
+        try:
+            if self.use_ex_api:
+                r = requests.get(url, headers=self._auth_headers())
+            else:
+                r = requests.get(url, headers=self.headers, auth=self.auth)
+            if r.status_code == 200:
+                return r.json().get("transitions", [])
+        except requests.RequestException:
+            pass
         return []
 
     def get_issue(self, issue_key: str) -> dict:
-        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}"
-        res = requests.get(url, headers=self.headers, auth=self.auth, params={"fields": "status"})
-        if res.status_code == 200:
-            return res.json()
+        url = f"{self._base()}/issue/{issue_key}"
+        params = {"fields": "status"}
+        try:
+            if self.use_ex_api:
+                r = requests.get(url, headers=self._auth_headers(), params=params)
+            else:
+                r = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+            if r.status_code == 200:
+                return r.json()
+        except requests.RequestException:
+            pass
         return {}
 
     def transicionar_status(self, issue_key: str, transition_id: str, fields: dict = None) -> requests.Response:
+        url = f"{self._base()}/issue/{issue_key}/transitions"
         payload = {"transition": {"id": str(transition_id)}}
         if fields:
             payload["fields"] = fields
-        url = f"{self.jira_url}/rest/api/3/issue/{issue_key}/transitions"
-        res = requests.post(url, headers=self.headers, auth=self.auth, json=payload)
-        return res
+        if self.use_ex_api:
+            return requests.post(url, headers=self._auth_headers(), json=payload)
+        else:
+            return requests.post(url, headers=self.headers, auth=self.auth, json=payload)
