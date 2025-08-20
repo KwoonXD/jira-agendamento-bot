@@ -1,7 +1,7 @@
 streamlit==1.48.0
-streamlit-autorefresh==1.0.1
-requests==2.32.5
-pyyaml==6.0.2
+requests==2.32.3
+streamlit-autorefresh
 pandas==2.3.1
+fpdf==1.7.2
 xlsxwriter==3.2.0
-fpdf2==2.7.9
+pyyaml==6.0.2
