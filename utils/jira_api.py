@@ -11,7 +11,10 @@ class JiraAPI:
     Suporta dois modos:
       • Domínio: https://<site>.atlassian.net/rest/api/3/...
       • EX API : https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/...
-    Para token fine-grained, use EX API (use_ex_api=True).
+
+    Para token fine-grained, use EX API (use_ex_api=True) + cloud_id.
+    Para contornar 410 em /search, na EX API usamos o novo endpoint /search/jql.
+    Doc: Issue search (inclui /rest/api/3/search/jql). 
     """
 
     def __init__(
@@ -50,7 +53,7 @@ class JiraAPI:
 
     def _auth_headers(self, json_content: bool = False) -> Dict[str, str]:
         """
-        Para EX API enviamos Authorization manualmente.
+        Para EX API enviamos Authorization manualmente (Basic <base64(email:token)>).
         """
         if not self.use_ex_api:
             return self.hdr_json if json_content else self.hdr_accept
@@ -90,45 +93,45 @@ class JiraAPI:
         except requests.RequestException as e:
             return None, {"url": url, "status": -1, "error": str(e)}
 
-    def tenant_info(self) -> Tuple[Dict[str, Any] | None, Dict[str, Any]]:
-        url = f"{self.jira_url}/_edge/tenant_info"
-        try:
-            r = requests.get(url, timeout=10)
-            dbg = {"url": url, "status": r.status_code}
-            if r.status_code == 200:
-                return r.json(), dbg
-            dbg["error"] = r.text
-            return None, dbg
-        except requests.RequestException as e:
-            return None, {"url": url, "status": -1, "error": str(e)}
-
     # ---------- Core ----------
-    def buscar_chamados(self, jql: str, fields: str) -> Tuple[list, Dict[str, Any]]:
+    def buscar_chamados(self, jql: str, fields: str, start_at: int = 0, max_results: int = 100) -> Tuple[list, Dict[str, Any]]:
         """
         Busca issues via JQL.
-        • EX API (use_ex_api=True): força POST /search (alguns tenants retornam 410/405 em GET).
-        • Domínio: usa GET /search (com params), como sempre.
+
+        • EX API (use_ex_api=True): usa **POST /search/jql** (novo endpoint), pois /search pode retornar 410 em alguns tenants.
+        • Domínio tradicional: mantém /search (GET).
         """
-        url = f"{self._base()}/search"
+        base = self._base()
+
+        # Normaliza fields para array no corpo POST.
+        field_list = [f.strip() for f in fields.split(",") if f.strip()]
 
         if self.use_ex_api:
-            # POST obrigatório na EX API para evitar 410
-            body_post = {"jql": jql, "maxResults": 100, "fields": [f.strip() for f in fields.split(",") if f.strip()]}
+            # ---- NOVO ENDPOINT: /search/jql (Enhanced Search) ----
+            url = f"{base}/search/jql"
+            body = {
+                "jql": jql,
+                "startAt": start_at,
+                "maxResults": max_results,
+                "fields": field_list
+            }
             try:
-                r = requests.post(url, headers=self._auth_headers(json_content=True), data=json.dumps(body_post))
+                r = requests.post(url, headers=self._auth_headers(json_content=True), data=json.dumps(body))
                 if r.status_code == 200:
                     issues = r.json().get("issues", [])
-                    self._set_debug(url, {"method": "POST", **body_post}, 200, None, len(issues), "POST")
-                    return issues, {"url": url, "params": body_post, "status": 200, "count": len(issues), "method": "POST"}
+                    self._set_debug(url, {"method": "POST", **body}, 200, None, len(issues), "POST")
+                    return issues, {"url": url, "params": body, "status": 200, "count": len(issues), "method": "POST"}
+                # se ainda assim houver erro, registra
                 err = _safe_json(r)
-                self._set_debug(url, {"method": "POST", **body_post}, r.status_code, err, 0, "POST")
-                return [], {"url": url, "params": body_post, "status": r.status_code, "error": err, "count": 0, "method": "POST"}
+                self._set_debug(url, {"method": "POST", **body}, r.status_code, err, 0, "POST")
+                return [], {"url": url, "params": body, "status": r.status_code, "error": err, "count": 0, "method": "POST"}
             except requests.RequestException as e:
-                self._set_debug(url, {"method": "POST", **body_post}, -1, str(e), 0, "POST")
-                return [], {"url": url, "params": body_post, "status": -1, "error": str(e), "count": 0, "method": "POST"}
+                self._set_debug(url, {"method": "POST", **body}, -1, str(e), 0, "POST")
+                return [], {"url": url, "params": body, "status": -1, "error": str(e), "count": 0, "method": "POST"}
 
-        # --- caminho antigo (domínio): GET /search ---
-        params_get = {"jql": jql, "maxResults": 100, "fields": fields}
+        # ---- CAMINHO TRADICIONAL (DOMÍNIO): GET /search ----
+        url = f"{base}/search"
+        params_get = {"jql": jql, "maxResults": max_results, "startAt": start_at, "fields": ",".join(field_list)}
         try:
             r = requests.get(url, headers=self.hdr_accept, auth=self.auth, params=params_get)
             if r.status_code == 200:
