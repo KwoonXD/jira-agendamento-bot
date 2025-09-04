@@ -14,13 +14,12 @@ st_autorefresh(interval=90_000, key="auto_refresh")
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ── Carrega secrets ──
+# ── Secrets ──
 EMAIL = st.secrets.get("EMAIL", "")
 API_TOKEN = st.secrets.get("API_TOKEN", "")
 CLOUD_ID = st.secrets.get("CLOUD_ID")
 USE_EX_API = str(st.secrets.get("USE_EX_API", "")).lower() == "true"
 
-# ── Guard de secrets ──
 if not EMAIL or not API_TOKEN:
     st.error("⚠️ Configure `EMAIL` e `API_TOKEN` em .streamlit/secrets.toml")
     st.stop()
@@ -28,7 +27,7 @@ if USE_EX_API and not CLOUD_ID:
     st.error("⚠️ `USE_EX_API=true`, mas faltou `CLOUD_ID` em secrets.toml")
     st.stop()
 
-# ── JiraAPI (EX API habilitada) ──
+# ── JiraAPI ──
 jira = JiraAPI(
     EMAIL,
     API_TOKEN,
@@ -37,82 +36,105 @@ jira = JiraAPI(
     cloud_id=CLOUD_ID,
 )
 
-# ── Verifica autenticação ──
+# ── Auth check ──
 who, dbg_who = jira.whoami()
 if not who:
     st.error(
         "❌ Falha de autenticação no Jira.\n\n"
         f"- URL: `{dbg_who.get('url')}`\n"
         f"- Status: `{dbg_who.get('status')}`\n"
-        f"- Erro: `{dbg_who.get('error')}`\n\n"
-        "Revise o token (fine‑grained), escopos de leitura e se a conta tem acesso ao site."
+        f"- Erro: `{dbg_who.get('error')}`\n"
     )
     st.stop()
 
-# ── Campos que seu painel usa ──
+# ── Campos usados ──
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
 )
 
-# ── Cargas ──
-pendentes_raw, dbg_pend = jira.buscar_chamados('project = FSA AND status = "AGENDAMENTO"', FIELDS)
+# ── JQLs (ajuste os nomes EXATOS de status depois de ver o diagnóstico) ──
+jql_pend = 'project = FSA AND status = "AGENDAMENTO"'
+jql_ag   = 'project = FSA AND status = "AGENDADO"'
+
+# ── Diagnóstico de JQL (parse + count) ──
+dbg_parse_pend = jira.parse_jql(jql_pend)
+dbg_count_pend = jira.count_jql(jql_pend)
+dbg_parse_ag   = jira.parse_jql(jql_ag)
+dbg_count_ag   = jira.count_jql(jql_ag)
+
+# ── Buscas ──
+pendentes_raw, dbg_pend = jira.buscar_chamados(jql_pend, FIELDS)
+agendados_raw, dbg_ag   = jira.buscar_chamados(jql_ag,   FIELDS)
+
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
-agendados_raw, dbg_ag = jira.buscar_chamados('project = FSA AND status = "AGENDADO"', FIELDS)
 grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
     f = issue["fields"]
     loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    raw = f.get("customfield_12036")
+    raw  = f.get("customfield_12036")
     data_str = (
         datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
         if raw else "Não definida"
     )
     grouped_sched[data_str][loja].append(issue)
 
-# ── Raw por loja para transições ──
 raw_by_loja = defaultdict(list)
 for i in pendentes_raw + agendados_raw:
     loja = i["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw_by_loja[loja].append(i)
 
-# ── Lojas (sem StopIteration) ──
+# ── Lojas ──
 lojas_pend = set(agrup_pend.keys())
 lojas_ag = set()
 for _, stores in grouped_sched.items():
     lojas_ag |= set(stores.keys())
 todas_as_lojas = sorted(lojas_pend | lojas_ag)
 
-# ── Sidebar: Ações + Debug ──
+# ── Sidebar ──
 with st.sidebar:
     st.header("Ações")
-    # ... (botão desfazer etc.)
+    if st.button("↩️ Desfazer última ação"):
+        if st.session_state.history:
+            action = st.session_state.history.pop()
+            reverted = 0
+            for key in action["keys"]:
+                trans = jira.get_transitions(key)
+                rev_id = next((t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]), None)
+                if rev_id and jira.transicionar_status(key, rev_id).status_code == 204:
+                    reverted += 1
+            st.success(f"Revertido: {reverted} FSAs → {action['from']}")
+        else:
+            st.info("Nenhuma ação para desfazer.")
 
     st.markdown("---")
     st.header("Transição de Chamados")
     loja_sel = st.selectbox("Selecione a loja:", ["—"] + todas_as_lojas)
 
-    with st.expander("🛠️ Debug da API Jira", expanded=False):
+    with st.expander("🔎 Status disponíveis (diagnóstico)", expanded=False):
+        st.caption("Status globais")
+        s_all_code, s_all = jira.list_all_statuses()
+        st.write("GET /status →", s_all_code)
+        st.write(s_all if s_all_code != 200 else [f"{x.get('name')} (id={x.get('id')})" for x in s_all][:50])
+
+        st.caption("Status do projeto FSA (por tipo de issue)")
+        s_proj_code, s_proj = jira.list_project_statuses("FSA")
+        st.write("GET /project/FSA/statuses →", s_proj_code)
+        st.write(s_proj)
+
+    with st.expander("🛠️ Debug da JQL e Search", expanded=False):
         st.json({
             "use_ex_api": USE_EX_API,
             "cloud_id": CLOUD_ID,
             "whoami_status": dbg_who.get("status"),
-            "pendentes": {
-                "status": dbg_pend.get("status"),
-                "count": dbg_pend.get("count"),
-                "method": dbg_pend.get("method"),
-                "url": dbg_pend.get("url"),
-                "params": dbg_pend.get("params"),
-            },
-            "agendados": {
-                "status": dbg_ag.get("status"),
-                "count": dbg_ag.get("count"),
-                "method": dbg_ag.get("method"),
-                "url": dbg_ag.get("url"),
-                "params": dbg_ag.get("params"),
-            },
+            "parse_pend": dbg_parse_pend,
+            "count_pend": dbg_count_pend,
+            "pendentes": dbg_pend,
+            "parse_ag": dbg_parse_ag,
+            "count_ag": dbg_count_ag,
+            "agendados": dbg_ag
         })
 
     if loja_sel != "—":
@@ -133,8 +155,8 @@ with st.sidebar:
                     "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}],
                 }
 
-            keys_pend = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
-            keys_sched = [i["key"] for i in agendados_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            keys_pend  = [i["key"] for i in pendentes_raw if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
+            keys_sched = [i["key"] for i in agendados_raw  if i["fields"].get("customfield_14954", {}).get("value") == loja_sel]
             all_keys = keys_pend + keys_sched
 
             if st.button(f"Agendar e mover {len(all_keys)} FSAs → Tec-Campo"):
@@ -231,7 +253,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.header("⏳ Chamados PENDENTES de Agendamento")
     if not pendentes_raw:
-        st.warning("Nenhum chamado em AGENDAMENTO.")
+        st.warning("Nenhum chamado em AGENDAMENTO (verifique o nome do status no diagnóstico).")
     else:
         for loja, iss in agrup_pend.items():
             with st.expander(f"{loja} — {len(iss)} chamado(s)", expanded=False):
@@ -240,7 +262,7 @@ with col1:
 with col2:
     st.header("📋 Chamados AGENDADOS")
     if not agendados_raw:
-        st.info("Nenhum chamado em AGENDADO.")
+        st.info("Nenhum chamado em AGENDADO (verifique o nome do status no diagnóstico).")
     else:
         for date, stores in sorted(grouped_sched.items()):
             total = sum(len(v) for v in stores.values())
