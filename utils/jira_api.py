@@ -97,11 +97,30 @@ class JiraAPI:
         except requests.RequestException as e:
             return None, {"url": url, "status": -1, "error": str(e)}
 
+    # ---------- status helpers ----------
+    def list_all_statuses(self):
+        """GET /status — lista status globais."""
+        url = f"{self._base()}/status"
+        try:
+            r = self._req("GET", url, json_content=False)
+            return r.status_code, (r.json() if r.status_code == 200 else _safe_json(r))
+        except Exception as e:
+            return -1, str(e)
+
+    def list_project_statuses(self, project_key: str):
+        """
+        GET /project/{projectKey}/statuses — lista status por tipo de issue no projeto.
+        """
+        url = f"{self._base()}/project/{project_key}/statuses"
+        try:
+            r = self._req("GET", url, json_content=False)
+            return r.status_code, (r.json() if r.status_code == 200 else _safe_json(r))
+        except Exception as e:
+            return -1, str(e)
+
     # ---------- JQL helpers ----------
     def parse_jql(self, jql: str) -> Dict[str, Any]:
-        """
-        POST /jql/parse — retorna erros de JQL (campo, status, projeto, etc.)
-        """
+        """POST /jql/parse — valida JQL e retorna erros detalhados (STRICT)."""
         url = f"{self._base()}/jql/parse"
         body = {"queries": [jql], "validation": "STRICT"}
         try:
@@ -116,9 +135,7 @@ class JiraAPI:
             return {"url": url, "status": -1, "error": str(e)}
 
     def count_jql(self, jql: str) -> Dict[str, Any]:
-        """
-        POST /search/approximate-count — conta issues para a JQL
-        """
+        """POST /search/approximate-count — conta issues para a JQL."""
         url = f"{self._base()}/search/approximate-count"
         body = {"jql": jql}
         try:
@@ -132,7 +149,7 @@ class JiraAPI:
         except requests.RequestException as e:
             return {"url": url, "status": -1, "error": str(e)}
 
-    # ---------- Busca principal (enhanced) ----------
+    # ---------- busca principal ----------
     def buscar_chamados(self, jql: str, fields: str, start_at: int = 0, max_results: int = 100) -> Tuple[List[dict], Dict[str, Any]]:
         """
         EX API: POST /search/jql (enhanced)
@@ -178,7 +195,7 @@ class JiraAPI:
             self._set_debug(url, {"method": "GET", **params_get}, -1, str(e), 0, "GET")
             return [], {"url": url, "params": params_get, "status": -1, "error": str(e), "count": 0, "method": "GET"}
 
-    # ---------- Demais helpers que você já usa ----------
+    # ---------- helpers do painel ----------
     def agrupar_chamados(self, issues: list) -> dict:
         agrup = defaultdict(list)
         for issue in issues:
