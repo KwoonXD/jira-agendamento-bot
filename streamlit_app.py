@@ -1,3 +1,4 @@
+# streamlit_app.py
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
@@ -6,7 +7,7 @@ from collections import defaultdict
 from utils.jira_api import JiraAPI
 from utils.messages import gerar_mensagem, verificar_duplicidade
 
-# ── Página + Auto‐refresh (90s) ──
+# ── Config & Auto-refresh (90s) ──
 st.set_page_config(page_title="Painel Field Service", layout="wide")
 st_autorefresh(interval=90_000, key="auto_refresh")
 
@@ -18,7 +19,7 @@ if "history" not in st.session_state:
 EMAIL = st.secrets.get("EMAIL", "")
 API_TOKEN = st.secrets.get("API_TOKEN", "")
 CLOUD_ID = st.secrets.get("CLOUD_ID")
-USE_EX_API = str(st.secrets.get("USE_EX_API", "")).lower() == "true"
+USE_EX_API = str(st.secrets.get("USE_EX_API", "true")).lower() == "true"
 
 if not EMAIL or not API_TOKEN:
     st.error("⚠️ Configure `EMAIL` e `API_TOKEN` em .streamlit/secrets.toml")
@@ -47,26 +48,27 @@ if not who:
     )
     st.stop()
 
-# ── Campos usados ──
+# ── Campos (string funciona; a lib converte p/ lista) ──
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
 )
 
-# ── JQLs (ajuste os nomes EXATOS de status depois de ver o diagnóstico) ──
-jql_pend = 'project = FSA AND status = "AGENDAMENTO"'
-jql_ag   = 'project = FSA AND status = "AGENDADO"'
+# ── JQLs com nomes exatos de status que você listou ──
+# IDs (se preferir): AGENDAMENTO=11499, AGENDADO=11481, TEC-CAMPO=11500, Aguardando Spare=11567
+JQL_PEND = 'project = FSA AND status = "AGENDAMENTO" ORDER BY updated DESC'
+JQL_AG   = 'project = FSA AND status = "Agendado" ORDER BY updated DESC'
 
-# ── Diagnóstico de JQL (parse + count) ──
-dbg_parse_pend = jira.parse_jql(jql_pend)
-dbg_count_pend = jira.count_jql(jql_pend)
-dbg_parse_ag   = jira.parse_jql(jql_ag)
-dbg_count_ag   = jira.count_jql(jql_ag)
+# ── Diagnóstico rápido (opcional) ──
+dbg_parse_pend = jira.parse_jql(JQL_PEND)
+dbg_count_pend = jira.count_jql(JQL_PEND)
+dbg_parse_ag   = jira.parse_jql(JQL_AG)
+dbg_count_ag   = jira.count_jql(JQL_AG)
 
-# ── Buscas ──
-pendentes_raw, dbg_pend = jira.buscar_chamados(jql_pend, FIELDS)
-agendados_raw, dbg_ag   = jira.buscar_chamados(jql_ag,   FIELDS)
+# ── Busca ENHANCED (com paginação) ──
+pendentes_raw, dbg_pend = jira.buscar_chamados_enhanced(JQL_PEND, FIELDS, page_size=100)
+agendados_raw, dbg_ag   = jira.buscar_chamados_enhanced(JQL_AG,   FIELDS, page_size=100)
 
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
@@ -74,10 +76,10 @@ grouped_sched = defaultdict(lambda: defaultdict(list))
 for issue in agendados_raw:
     f = issue["fields"]
     loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-    raw  = f.get("customfield_12036")
+    raw_dt = f.get("customfield_12036")
     data_str = (
-        datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
-        if raw else "Não definida"
+        datetime.strptime(raw_dt, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
+        if raw_dt else "Não definida"
     )
     grouped_sched[data_str][loja].append(issue)
 
@@ -85,13 +87,6 @@ raw_by_loja = defaultdict(list)
 for i in pendentes_raw + agendados_raw:
     loja = i["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw_by_loja[loja].append(i)
-
-# ── Lojas ──
-lojas_pend = set(agrup_pend.keys())
-lojas_ag = set()
-for _, stores in grouped_sched.items():
-    lojas_ag |= set(stores.keys())
-todas_as_lojas = sorted(lojas_pend | lojas_ag)
 
 # ── Sidebar ──
 with st.sidebar:
@@ -111,20 +106,17 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Transição de Chamados")
-    loja_sel = st.selectbox("Selecione a loja:", ["—"] + todas_as_lojas)
 
-    with st.expander("🔎 Status disponíveis (diagnóstico)", expanded=False):
-        st.caption("Status globais")
-        s_all_code, s_all = jira.list_all_statuses()
-        st.write("GET /status →", s_all_code)
-        st.write(s_all if s_all_code != 200 else [f"{x.get('name')} (id={x.get('id')})" for x in s_all][:50])
+    # Lojas (robusto mesmo sem agendados)
+    lojas_pend = set(agrup_pend.keys())
+    lojas_ag = set()
+    for _, stores in grouped_sched.items():
+        lojas_ag |= set(stores.keys())
+    todas_as_lojas = ["—"] + sorted(lojas_pend | lojas_ag)
 
-        st.caption("Status do projeto FSA (por tipo de issue)")
-        s_proj_code, s_proj = jira.list_project_statuses("FSA")
-        st.write("GET /project/FSA/statuses →", s_proj_code)
-        st.write(s_proj)
+    loja_sel = st.selectbox("Selecione a loja:", todas_as_lojas)
 
-    with st.expander("🛠️ Debug da JQL e Search", expanded=False):
+    with st.expander("🛠️ Debug (Enhanced Search)", expanded=False):
         st.json({
             "use_ex_api": USE_EX_API,
             "cloud_id": CLOUD_ID,
@@ -134,7 +126,15 @@ with st.sidebar:
             "pendentes": dbg_pend,
             "parse_ag": dbg_parse_ag,
             "count_ag": dbg_count_ag,
-            "agendados": dbg_ag
+            "agendados": dbg_ag,
+            "last_call": {
+                "url": jira.last_url,
+                "method": jira.last_method,
+                "status": jira.last_status,
+                "count": jira.last_count,
+                "params": jira.last_params,
+                "error": jira.last_error
+            }
         })
 
     if loja_sel != "—":
@@ -163,6 +163,7 @@ with st.sidebar:
                 errors = []
                 moved = 0
 
+                # a) agendar pendentes
                 for k in keys_pend:
                     trans = jira.get_transitions(k)
                     agid = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
@@ -171,6 +172,7 @@ with st.sidebar:
                         if r.status_code != 204:
                             errors.append(f"{k}⏳{r.status_code}")
 
+                # b) mover todos para Tec-Campo
                 for k in all_keys:
                     trans = jira.get_transitions(k)
                     tcid = next((t["id"] for t in trans if "tec-campo" in t.get("to", {}).get("name", "").lower()), None)
@@ -198,6 +200,7 @@ with st.sidebar:
                         st.code(gerar_mensagem(loja_sel, antigos), language="text")
 
         else:
+            # fluxo manual
             opts = [
                 i["key"] for i in pendentes_raw
                 if i["fields"].get("customfield_14954", {}).get("value") == loja_sel
@@ -253,16 +256,16 @@ col1, col2 = st.columns(2)
 with col1:
     st.header("⏳ Chamados PENDENTES de Agendamento")
     if not pendentes_raw:
-        st.warning("Nenhum chamado em AGENDAMENTO (verifique o nome do status no diagnóstico).")
+        st.warning("Nenhum chamado em AGENDAMENTO.")
     else:
-        for loja, iss in agrup_pend.items():
+        for loja, iss in sorted(jira.agrupar_chamados(pendentes_raw).items()):
             with st.expander(f"{loja} — {len(iss)} chamado(s)", expanded=False):
                 st.code(gerar_mensagem(loja, iss), language="text")
 
 with col2:
     st.header("📋 Chamados AGENDADOS")
     if not agendados_raw:
-        st.info("Nenhum chamado em AGENDADO (verifique o nome do status no diagnóstico).")
+        st.info("Nenhum chamado em AGENDADO.")
     else:
         for date, stores in sorted(grouped_sched.items()):
             total = sum(len(v) for v in stores.values())
@@ -271,16 +274,15 @@ with col2:
                 detalhes = jira.agrupar_chamados(iss)[loja]
                 dup_keys = [d["key"] for d in detalhes
                             if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
-                spare_raw, _dbg_spare = jira.buscar_chamados(
+                # Spare da mesma loja
+                spare_raw, _dbg = jira.buscar_chamados_enhanced(
                     f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = "{loja}"',
-                    FIELDS,
+                    FIELDS, page_size=100
                 )
                 spare_keys = [i["key"] for i in spare_raw]
                 tags = []
-                if spare_keys:
-                    tags.append("Spare: " + ", ".join(spare_keys))
-                if dup_keys:
-                    tags.append("Dup: " + ", ".join(dup_keys))
+                if spare_keys: tags.append("Spare: " + ", ".join(spare_keys))
+                if dup_keys:   tags.append("Dup: " + ", ".join(dup_keys))
                 tag_str = f" [{' • '.join(tags)}]" if tags else ""
                 with st.expander(f"{loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
                     st.markdown("**FSAs:** " + ", ".join(d["key"] for d in detalhes))
