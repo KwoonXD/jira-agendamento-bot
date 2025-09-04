@@ -1,3 +1,4 @@
+# utils/jira_api.py
 import base64
 import json
 import requests
@@ -8,15 +9,15 @@ from typing import Tuple, Dict, Any, Optional, List
 
 class JiraAPI:
     """
-    Dois modos:
+    Suporta dois modos:
       • Domínio: https://<site>.atlassian.net/rest/api/3/...
       • EX API : https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/...
 
-    Para token fine-grained, use EX API (use_ex_api=True) + cloud_id.
+    Para tokens fine-grained/OAuth, use EX API (use_ex_api=True) + cloud_id.
     Endpoints usados:
-      - POST /rest/api/3/jql/parse                 (valida JQL)
-      - POST /rest/api/3/search/approximate-count  (conta issues)
-      - POST /rest/api/3/search/jql                (enhanced search - busca issues)
+      - POST /rest/api/3/jql/parse
+      - POST /rest/api/3/search/approximate-count
+      - POST /rest/api/3/search/jql (enhanced search, com paginação via nextPageToken)
     """
 
     def __init__(
@@ -37,7 +38,7 @@ class JiraAPI:
         self.hdr_json = {"Accept": "application/json", "Content-Type": "application/json"}
         self.hdr_accept = {"Accept": "application/json"}
 
-        # debug última chamada
+        # debug da última chamada
         self.last_status = None
         self.last_error = None
         self.last_url = None
@@ -45,7 +46,7 @@ class JiraAPI:
         self.last_count = None
         self.last_method = None
 
-    # ---------- helpers ----------
+    # ---------- base & headers ----------
     def _base(self) -> str:
         if self.use_ex_api:
             if not self.cloud_id:
@@ -54,6 +55,7 @@ class JiraAPI:
         return f"{self.jira_url}/rest/api/3"
 
     def _auth_headers(self, json_content: bool = False) -> Dict[str, str]:
+        """Na EX API a autenticação é via header Basic manual."""
         if not self.use_ex_api:
             return self.hdr_json if json_content else self.hdr_accept
         basic = f"{self.email}:{self.api_token}".encode("utf-8")
@@ -97,30 +99,7 @@ class JiraAPI:
         except requests.RequestException as e:
             return None, {"url": url, "status": -1, "error": str(e)}
 
-    # ---------- status helpers ----------
-    def list_all_statuses(self):
-        """GET /status — lista status globais."""
-        url = f"{self._base()}/status"
-        try:
-            r = self._req("GET", url, json_content=False)
-            return r.status_code, (r.json() if r.status_code == 200 else _safe_json(r))
-        except Exception as e:
-            return -1, str(e)
-
-    def list_project_statuses(self, project_key: str):
-        """
-        GET /project/{projectKey}/statuses — lista status por tipo de issue no projeto.
-        """
-        url = f"{self._base()}/project/{project_key}/statuses"
-        try:
-            r = self._req("GET", url, json_content=False)
-            return r.status_code, (r.json() if r.status_code == 200 else _safe_json(r))
-        except Exception as e:
-            return -1, str(e)
-
-    # ---------- JQL helpers ----------
     def parse_jql(self, jql: str) -> Dict[str, Any]:
-        """POST /jql/parse — valida JQL e retorna erros detalhados (STRICT)."""
         url = f"{self._base()}/jql/parse"
         body = {"queries": [jql], "validation": "STRICT"}
         try:
@@ -135,7 +114,6 @@ class JiraAPI:
             return {"url": url, "status": -1, "error": str(e)}
 
     def count_jql(self, jql: str) -> Dict[str, Any]:
-        """POST /search/approximate-count — conta issues para a JQL."""
         url = f"{self._base()}/search/approximate-count"
         body = {"jql": jql}
         try:
@@ -149,53 +127,58 @@ class JiraAPI:
         except requests.RequestException as e:
             return {"url": url, "status": -1, "error": str(e)}
 
-    # ---------- busca principal ----------
-    def buscar_chamados(self, jql: str, fields: str, start_at: int = 0, max_results: int = 100) -> Tuple[List[dict], Dict[str, Any]]:
+    # ---------- busca principal (ENHANCED) ----------
+    def buscar_chamados_enhanced(self, jql: str, fields: str | List[str], page_size: int = 100, reconcile: bool = False) -> Tuple[List[dict], Dict[str, Any]]:
         """
-        EX API: POST /search/jql (enhanced)
-        Domínio: GET /search (legado)
+        POST /search/jql com body JSON (jql, fields, maxResults) + paginação via nextPageToken.
+        Retorna (issues, debug_dict)
         """
         base = self._base()
-        fields_list = [f.strip() for f in fields.split(",") if f.strip()]
+        url = f"{base}/search/jql"
 
-        if self.use_ex_api:
-            url = f"{base}/search/jql"
+        if isinstance(fields, str):
+            fields_list = [f.strip() for f in fields.split(",") if f.strip()]
+        else:
+            fields_list = list(fields or [])
+
+        issues: List[dict] = []
+        next_page_token: Optional[str] = None
+        last_resp = {}
+
+        while True:
             body = {
                 "jql": jql,
-                "startAt": start_at,
-                "maxResults": max_results,
+                "maxResults": int(page_size),
                 "fields": fields_list
             }
+            if reconcile:
+                body["reconcileIssues"] = []
+            if next_page_token:
+                body["nextPageToken"] = next_page_token
+
             try:
                 r = self._req("POST", url, json_body=body)
-                if r.status_code == 200:
-                    issues = r.json().get("issues", [])
-                    self._set_debug(url, {"method": "POST", **body}, 200, None, len(issues), "POST")
-                    return issues, {"url": url, "params": body, "status": 200, "count": len(issues), "method": "POST"}
-                err = _safe_json(r)
-                self._set_debug(url, {"method": "POST", **body}, r.status_code, err, 0, "POST")
-                return [], {"url": url, "params": body, "status": r.status_code, "error": err, "count": 0, "method": "POST"}
+                if r.status_code != 200:
+                    err = _safe_json(r)
+                    self._set_debug(url, {"method": "POST", **body}, r.status_code, err, 0, "POST")
+                    return [], {"url": url, "params": body, "status": r.status_code, "error": err, "count": 0, "method": "POST"}
+
+                data = r.json()
+                batch = data.get("issues", [])
+                issues.extend(batch)
+                next_page_token = data.get("nextPageToken")
+                last_resp = {"url": url, "params": body, "status": 200, "count": len(batch), "method": "POST"}
+
+                if not next_page_token:
+                    break
             except requests.RequestException as e:
                 self._set_debug(url, {"method": "POST", **body}, -1, str(e), 0, "POST")
                 return [], {"url": url, "params": body, "status": -1, "error": str(e), "count": 0, "method": "POST"}
 
-        # caminho tradicional (domínio)
-        url = f"{base}/search"
-        params_get = {"jql": jql, "maxResults": max_results, "startAt": start_at, "fields": ",".join(fields_list)}
-        try:
-            r = self._req("GET", url, params=params_get, json_content=False)
-            if r.status_code == 200:
-                issues = r.json().get("issues", [])
-                self._set_debug(url, {"method": "GET", **params_get}, 200, None, len(issues), "GET")
-                return issues, {"url": url, "params": params_get, "status": 200, "count": len(issues), "method": "GET"}
-            err = _safe_json(r)
-            self._set_debug(url, {"method": "GET", **params_get}, r.status_code, err, 0, "GET")
-            return [], {"url": url, "params": params_get, "status": r.status_code, "error": err, "count": 0, "method": "GET"}
-        except requests.RequestException as e:
-            self._set_debug(url, {"method": "GET", **params_get}, -1, str(e), 0, "GET")
-            return [], {"url": url, "params": params_get, "status": -1, "error": str(e), "count": 0, "method": "GET"}
+        self._set_debug(url, last_resp.get("params"), last_resp.get("status", 200), None, len(issues), "POST")
+        return issues, {"url": url, "status": 200, "count": len(issues), "method": "POST"}
 
-    # ---------- helpers do painel ----------
+    # ---------- transições / leitura ----------
     def agrupar_chamados(self, issues: list) -> dict:
         agrup = defaultdict(list)
         for issue in issues:
