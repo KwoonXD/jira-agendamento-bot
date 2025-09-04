@@ -106,50 +106,41 @@ class JiraAPI:
     def buscar_chamados(self, jql: str, fields: str) -> Tuple[list, Dict[str, Any]]:
         """
         Busca issues via JQL.
-        Tenta GET /search; se vier 410/405, refaz via POST /search com body JSON.
+        • EX API (use_ex_api=True): força POST /search (alguns tenants retornam 410/405 em GET).
+        • Domínio: usa GET /search (com params), como sempre.
         """
         url = f"{self._base()}/search"
-        params_get = {"jql": jql, "maxResults": 100, "fields": fields}
 
-        # 1) GET
+        if self.use_ex_api:
+            # POST obrigatório na EX API para evitar 410
+            body_post = {"jql": jql, "maxResults": 100, "fields": [f.strip() for f in fields.split(",") if f.strip()]}
+            try:
+                r = requests.post(url, headers=self._auth_headers(json_content=True), data=json.dumps(body_post))
+                if r.status_code == 200:
+                    issues = r.json().get("issues", [])
+                    self._set_debug(url, {"method": "POST", **body_post}, 200, None, len(issues), "POST")
+                    return issues, {"url": url, "params": body_post, "status": 200, "count": len(issues), "method": "POST"}
+                err = _safe_json(r)
+                self._set_debug(url, {"method": "POST", **body_post}, r.status_code, err, 0, "POST")
+                return [], {"url": url, "params": body_post, "status": r.status_code, "error": err, "count": 0, "method": "POST"}
+            except requests.RequestException as e:
+                self._set_debug(url, {"method": "POST", **body_post}, -1, str(e), 0, "POST")
+                return [], {"url": url, "params": body_post, "status": -1, "error": str(e), "count": 0, "method": "POST"}
+
+        # --- caminho antigo (domínio): GET /search ---
+        params_get = {"jql": jql, "maxResults": 100, "fields": fields}
         try:
-            if self.use_ex_api:
-                r = requests.get(url, headers=self._auth_headers(json_content=False), params=params_get)
-            else:
-                r = requests.get(url, headers=self.hdr_accept, auth=self.auth, params=params_get)
+            r = requests.get(url, headers=self.hdr_accept, auth=self.auth, params=params_get)
             if r.status_code == 200:
                 issues = r.json().get("issues", [])
                 self._set_debug(url, {"method": "GET", **params_get}, 200, None, len(issues), "GET")
-                return issues, {"url": url, "params": params_get, "status": 200, "count": len(issues)}
-            # se for “Gone”/“Method Not Allowed”, tenta POST
-            if r.status_code in (405, 410):
-                # cai para o POST
-                pass
-            else:
-                err = _safe_json(r)
-                self._set_debug(url, {"method": "GET", **params_get}, r.status_code, err, 0, "GET")
-                return [], {"url": url, "params": params_get, "status": r.status_code, "error": err, "count": 0}
-        except requests.RequestException as e:
-            # vai tentar POST também
-            pass
-
-        # 2) POST
-        body_post = {"jql": jql, "maxResults": 100, "fields": fields.split(",")}
-        try:
-            if self.use_ex_api:
-                r = requests.post(url, headers=self._auth_headers(json_content=True), data=json.dumps(body_post))
-            else:
-                r = requests.post(url, headers=self.hdr_json, auth=self.auth, json=body_post)
-            if r.status_code == 200:
-                issues = r.json().get("issues", [])
-                self._set_debug(url, {"method": "POST", **body_post}, 200, None, len(issues), "POST")
-                return issues, {"url": url, "params": body_post, "status": 200, "count": len(issues)}
+                return issues, {"url": url, "params": params_get, "status": 200, "count": len(issues), "method": "GET"}
             err = _safe_json(r)
-            self._set_debug(url, {"method": "POST", **body_post}, r.status_code, err, 0, "POST")
-            return [], {"url": url, "params": body_post, "status": r.status_code, "error": err, "count": 0}
+            self._set_debug(url, {"method": "GET", **params_get}, r.status_code, err, 0, "GET")
+            return [], {"url": url, "params": params_get, "status": r.status_code, "error": err, "count": 0, "method": "GET"}
         except requests.RequestException as e:
-            self._set_debug(url, {"method": "POST", **body_post}, -1, str(e), 0, "POST")
-            return [], {"url": url, "params": body_post, "status": -1, "error": str(e), "count": 0}
+            self._set_debug(url, {"method": "GET", **params_get}, -1, str(e), 0, "GET")
+            return [], {"url": url, "params": params_get, "status": -1, "error": str(e), "count": 0, "method": "GET"}
 
     def agrupar_chamados(self, issues: list) -> dict:
         agrup = defaultdict(list)
