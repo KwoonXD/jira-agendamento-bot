@@ -88,18 +88,7 @@ todas_as_lojas = sorted(lojas_pend | lojas_ag)
 # ── Sidebar: Ações + Debug ──
 with st.sidebar:
     st.header("Ações")
-    if st.button("↩️ Desfazer última ação"):
-        if st.session_state.history:
-            action = st.session_state.history.pop()
-            reverted = 0
-            for key in action["keys"]:
-                trans = jira.get_transitions(key)
-                rev_id = next((t["id"] for t in trans if t.get("to", {}).get("name") == action["from"]), None)
-                if rev_id and jira.transicionar_status(key, rev_id).status_code == 204:
-                    reverted += 1
-            st.success(f"Revertido: {reverted} FSAs → {action['from']}")
-        else:
-            st.info("Nenhuma ação para desfazer.")
+    # ... (botão desfazer etc.)
 
     st.markdown("---")
     st.header("Transição de Chamados")
@@ -110,8 +99,20 @@ with st.sidebar:
             "use_ex_api": USE_EX_API,
             "cloud_id": CLOUD_ID,
             "whoami_status": dbg_who.get("status"),
-            "pendentes": {"status": dbg_pend.get("status"), "count": dbg_pend.get("count"), "jql": dbg_pend.get("params",{}).get("jql")},
-            "agendados": {"status": dbg_ag.get("status"), "count": dbg_ag.get("count"), "jql": dbg_ag.get("params",{}).get("jql")},
+            "pendentes": {
+                "status": dbg_pend.get("status"),
+                "count": dbg_pend.get("count"),
+                "method": dbg_pend.get("method"),
+                "url": dbg_pend.get("url"),
+                "params": dbg_pend.get("params"),
+            },
+            "agendados": {
+                "status": dbg_ag.get("status"),
+                "count": dbg_ag.get("count"),
+                "method": dbg_ag.get("method"),
+                "url": dbg_ag.get("url"),
+                "params": dbg_ag.get("params"),
+            },
         })
 
     if loja_sel != "—":
