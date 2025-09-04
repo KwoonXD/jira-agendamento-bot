@@ -1,8 +1,9 @@
 import base64
+import json
 import requests
 from requests.auth import HTTPBasicAuth
 from collections import defaultdict
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, Optional
 
 
 class JiraAPI:
@@ -10,7 +11,7 @@ class JiraAPI:
     Suporta dois modos:
       • Domínio: https://<site>.atlassian.net/rest/api/3/...
       • EX API : https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/...
-    Para token fine‑grained, use EX API (use_ex_api=True).
+    Para token fine-grained, use EX API (use_ex_api=True).
     """
 
     def __init__(
@@ -28,7 +29,8 @@ class JiraAPI:
         self.cloud_id = cloud_id
 
         self.auth = HTTPBasicAuth(self.email, self.api_token)
-        self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        self.hdr_json = {"Accept": "application/json", "Content-Type": "application/json"}
+        self.hdr_accept = {"Accept": "application/json"}
 
         # debug da última chamada
         self.last_status = None
@@ -36,6 +38,7 @@ class JiraAPI:
         self.last_url = None
         self.last_params = None
         self.last_count = None
+        self.last_method = None
 
     # ---------- helpers ----------
     def _base(self) -> str:
@@ -45,32 +48,37 @@ class JiraAPI:
             return f"https://api.atlassian.com/ex/jira/{self.cloud_id}/rest/api/3"
         return f"{self.jira_url}/rest/api/3"
 
-    def _auth_headers(self) -> Dict[str, str]:
+    def _auth_headers(self, json_content: bool = False) -> Dict[str, str]:
+        """
+        Para EX API enviamos Authorization manualmente.
+        """
         if not self.use_ex_api:
-            return {}
+            return self.hdr_json if json_content else self.hdr_accept
         basic = f"{self.email}:{self.api_token}".encode("utf-8")
-        return {
+        base = {
             "Authorization": "Basic " + base64.b64encode(basic).decode("ascii"),
             "Accept": "application/json",
-            "Content-Type": "application/json",
         }
+        if json_content:
+            base["Content-Type"] = "application/json"
+        return base
 
-    def _set_debug(self, url: str, params: Dict[str, Any], status: int, error: Any, count: int):
+    def _set_debug(self, url: str, params: Any, status: int, error: Any, count: int, method: str):
         self.last_url = url
         self.last_params = params
         self.last_status = status
         self.last_error = error
         self.last_count = count
+        self.last_method = method
 
     # ---------- diagnóstico ----------
     def whoami(self) -> Tuple[Dict[str, Any] | None, Dict[str, Any]]:
         url = f"{self._base()}/myself"
-        hdr = self._auth_headers() or self.headers
         try:
             if self.use_ex_api:
-                r = requests.get(url, headers=hdr)
+                r = requests.get(url, headers=self._auth_headers(json_content=False))
             else:
-                r = requests.get(url, headers=self.headers, auth=self.auth)
+                r = requests.get(url, headers=self.hdr_accept, auth=self.auth)
             dbg = {"url": url, "status": r.status_code}
             if r.status_code == 200:
                 return r.json(), dbg
@@ -96,33 +104,52 @@ class JiraAPI:
 
     # ---------- Core ----------
     def buscar_chamados(self, jql: str, fields: str) -> Tuple[list, Dict[str, Any]]:
-        params = {"jql": jql, "maxResults": 100, "fields": fields}
+        """
+        Busca issues via JQL.
+        Tenta GET /search; se vier 410/405, refaz via POST /search com body JSON.
+        """
         url = f"{self._base()}/search"
-        debug = {"url": url, "params": params.copy(), "status": None, "error": None, "count": None}
+        params_get = {"jql": jql, "maxResults": 100, "fields": fields}
 
+        # 1) GET
         try:
             if self.use_ex_api:
-                r = requests.get(url, headers=self._auth_headers(), params=params)
+                r = requests.get(url, headers=self._auth_headers(json_content=False), params=params_get)
             else:
-                r = requests.get(url, headers=self.headers, auth=self.auth, params=params)
-            status = r.status_code
-            if status == 200:
+                r = requests.get(url, headers=self.hdr_accept, auth=self.auth, params=params_get)
+            if r.status_code == 200:
                 issues = r.json().get("issues", [])
-                debug.update({"status": status, "count": len(issues)})
-                self._set_debug(url, params, status, None, len(issues))
-                return issues, debug
+                self._set_debug(url, {"method": "GET", **params_get}, 200, None, len(issues), "GET")
+                return issues, {"url": url, "params": params_get, "status": 200, "count": len(issues)}
+            # se for “Gone”/“Method Not Allowed”, tenta POST
+            if r.status_code in (405, 410):
+                # cai para o POST
+                pass
             else:
-                try:
-                    err = r.json()
-                except Exception:
-                    err = r.text
-                debug.update({"status": status, "error": err, "count": 0})
-                self._set_debug(url, params, status, err, 0)
-                return [], debug
+                err = _safe_json(r)
+                self._set_debug(url, {"method": "GET", **params_get}, r.status_code, err, 0, "GET")
+                return [], {"url": url, "params": params_get, "status": r.status_code, "error": err, "count": 0}
         except requests.RequestException as e:
-            debug.update({"status": -1, "error": str(e), "count": 0})
-            self._set_debug(url, params, -1, str(e), 0)
-            return [], debug
+            # vai tentar POST também
+            pass
+
+        # 2) POST
+        body_post = {"jql": jql, "maxResults": 100, "fields": fields.split(",")}
+        try:
+            if self.use_ex_api:
+                r = requests.post(url, headers=self._auth_headers(json_content=True), data=json.dumps(body_post))
+            else:
+                r = requests.post(url, headers=self.hdr_json, auth=self.auth, json=body_post)
+            if r.status_code == 200:
+                issues = r.json().get("issues", [])
+                self._set_debug(url, {"method": "POST", **body_post}, 200, None, len(issues), "POST")
+                return issues, {"url": url, "params": body_post, "status": 200, "count": len(issues)}
+            err = _safe_json(r)
+            self._set_debug(url, {"method": "POST", **body_post}, r.status_code, err, 0, "POST")
+            return [], {"url": url, "params": body_post, "status": r.status_code, "error": err, "count": 0}
+        except requests.RequestException as e:
+            self._set_debug(url, {"method": "POST", **body_post}, -1, str(e), 0, "POST")
+            return [], {"url": url, "params": body_post, "status": -1, "error": str(e), "count": 0}
 
     def agrupar_chamados(self, issues: list) -> dict:
         agrup = defaultdict(list)
@@ -146,9 +173,9 @@ class JiraAPI:
         url = f"{self._base()}/issue/{issue_key}/transitions"
         try:
             if self.use_ex_api:
-                r = requests.get(url, headers=self._auth_headers())
+                r = requests.get(url, headers=self._auth_headers(json_content=False))
             else:
-                r = requests.get(url, headers=self.headers, auth=self.auth)
+                r = requests.get(url, headers=self.hdr_accept, auth=self.auth)
             if r.status_code == 200:
                 return r.json().get("transitions", [])
         except requests.RequestException:
@@ -160,9 +187,9 @@ class JiraAPI:
         params = {"fields": "status"}
         try:
             if self.use_ex_api:
-                r = requests.get(url, headers=self._auth_headers(), params=params)
+                r = requests.get(url, headers=self._auth_headers(json_content=False), params=params)
             else:
-                r = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+                r = requests.get(url, headers=self.hdr_accept, auth=self.auth, params=params)
             if r.status_code == 200:
                 return r.json()
         except requests.RequestException:
@@ -175,6 +202,13 @@ class JiraAPI:
         if fields:
             payload["fields"] = fields
         if self.use_ex_api:
-            return requests.post(url, headers=self._auth_headers(), json=payload)
+            return requests.post(url, headers=self._auth_headers(json_content=True), data=json.dumps(payload))
         else:
-            return requests.post(url, headers=self.headers, auth=self.auth, json=payload)
+            return requests.post(url, headers=self.hdr_json, auth=self.auth, json=payload)
+
+
+def _safe_json(r: requests.Response):
+    try:
+        return r.json()
+    except Exception:
+        return r.text
