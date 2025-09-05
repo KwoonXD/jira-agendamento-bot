@@ -1,9 +1,8 @@
 # streamlit_app.py
 # -----------------
 # Painel Field Service (Jira) + Heatmap gratuito (Nominatim/OSM)
-# ✅ /rest/api/3/search/jql com payload correto: queries[].jql + fields no topo
-# ✅ Auto-refresh opcional: tenta streamlit_autorefresh; se falhar, usa meta refresh
-# ✅ Robustez contra DF vazio / campos faltando
+# Cliente Jira resiliente a diferenças de payload entre /search/jql e /search
+# Mostra diagnóstico quando houver erro de payload (400) ou remoção (410)
 
 from __future__ import annotations
 import os
@@ -30,6 +29,12 @@ with st.sidebar:
         key="auto_refresh_on",
         help="Desligue para operar sem recarregar a página."
     )
+    st.checkbox(
+        "🛡️ Modo compatibilidade (multi-tentativa em /search*/payload)",
+        value=st.session_state.get("compat_mode", True),
+        key="compat_mode",
+        help="Se ligado, o app tenta formatos alternativos quando 400/410 ocorrer."
+    )
 
 # Tenta usar o componente; se falhar, usa META refresh
 if st.session_state.auto_refresh_on:
@@ -41,11 +46,7 @@ if st.session_state.auto_refresh_on:
     except Exception:
         used_component = False
     if not used_component:
-        # Fallback: meta refresh a cada 90s sem dependências externas
-        st.markdown(
-            """<meta http-equiv="refresh" content="90">""",
-            unsafe_allow_html=True
-        )
+        st.markdown("""<meta http-equiv="refresh" content="90">""", unsafe_allow_html=True)
         st.caption("⏱️ Auto-refresh por fallback (meta refresh).")
 
 # ============== SEGREDOS / CREDENCIAIS ==============
@@ -82,7 +83,9 @@ EXPECTED_COLS = [
     "data_agendada","status"
 ]
 
-# ============== HELPERS JIRA ==============
+# =========================
+# HELPERS JIRA
+# =========================
 def jira_base() -> str:
     """
     Retorna a base correta da API v3:
@@ -102,57 +105,116 @@ def jira_base() -> str:
 
 def _normalize_search_response(j: dict) -> dict:
     """
-    Normaliza resposta do /search/jql:
-      {"results":[{"issues":[...], ...}]}
-    Retorna {"issues":[...]} mesmo sem resultados.
+    Normaliza resposta de /search/jql (results[0].issues) ou /search (issues).
+    Retorna {"issues":[...]} ou {"issues":[]}.
     """
     if not isinstance(j, dict):
         return {"issues": []}
-    res = j.get("results")
-    if isinstance(res, list) and res:
-        first = res[0]
+    if "results" in j and isinstance(j["results"], list) and j["results"]:
+        first = j["results"][0]
         if isinstance(first, dict) and isinstance(first.get("issues"), list):
             return {"issues": first["issues"]}
-    # fallback (alguns proxies devolvem "issues" direto)
     if isinstance(j.get("issues"), list):
         return {"issues": j["issues"]}
     return {"issues": []}
 
-def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields: list[str] | None = None) -> dict:
+# Guardamos último diagnóstico de chamada:
+_last_diag = st.session_state.get("_last_diag", None)
+
+def _record_diag(method: str, url: str, body_or_params, status: int, text: str):
+    global _last_diag
+    _last_diag = {
+        "method": method,
+        "url": url,
+        "payload": body_or_params,
+        "status": status,
+        "response": text[:1000],  # evita texto gigante
+    }
+    st.session_state["_last_diag"] = _last_diag
+
+def jira_search_resilient(jql: str, start_at: int = 0, max_results: int = 100, fields: list[str] | None = None) -> dict:
     """
-    ✅ Usa SOMENTE POST /rest/api/3/search/jql (evita 410).
-    ✅ Payload correto: queries[].**jql** + fields no TOPO.
+    Estratégia:
+      1) POST /search/jql com queries[].jql + fields no topo
+      2) POST /search/jql com queries[].query + fields no topo
+      3) POST /search      com {"jql": "...", "fields":[...]} (fallback)
+    Retorna {"issues":[...]} ou {"error":True, "status":..., "text":...}
     """
     base = jira_base()
-    url = f"{base}/search/jql"
 
-    body = {
+    # 1) /search/jql com queries[].jql
+    url1 = f"{base}/search/jql"
+    body1 = {
         "queries": [{
-            "jql": jql,           # <- CHAVE CORRETA
+            "jql": jql,
             "startAt": start_at,
             "maxResults": max_results,
         }]
     }
     if fields:
-        body["fields"] = fields  # <- fields no topo (não dentro de queries)
-
+        body1["fields"] = fields
     try:
-        r = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=body, timeout=60)
+        r1 = requests.post(url1, headers=HEADERS_JSON, auth=AUTH, json=body1, timeout=60)
+        _record_diag("POST", url1, body1, r1.status_code, r1.text)
+        if r1.status_code in (200, 201):
+            return _normalize_search_response(r1.json())
+        # Se não estamos no modo compatibilidade, já retorna o erro
+        if not st.session_state.get("compat_mode", True):
+            return {"error": True, "status": r1.status_code, "text": r1.text}
     except Exception as e:
-        return {"error": True, "status": 0, "text": f"Falha de conexão: {e}"}
+        _record_diag("POST", url1, body1, 0, f"Falha de conexão: {e}")
+        if not st.session_state.get("compat_mode", True):
+            return {"error": True, "status": 0, "text": str(e)}
 
-    if r.status_code in (200, 201):
-        return _normalize_search_response(r.json())
+    # 2) /search/jql com queries[].query
+    url2 = f"{base}/search/jql"
+    body2 = {
+        "queries": [{
+            "query": jql,
+            "startAt": start_at,
+            "maxResults": max_results,
+        }]
+    }
+    if fields:
+        body2["fields"] = fields
+    try:
+        r2 = requests.post(url2, headers=HEADERS_JSON, auth=AUTH, json=body2, timeout=60)
+        _record_diag("POST", url2, body2, r2.status_code, r2.text)
+        if r2.status_code in (200, 201):
+            return _normalize_search_response(r2.json())
+        if not st.session_state.get("compat_mode", True):
+            return {"error": True, "status": r2.status_code, "text": r2.text}
+    except Exception as e:
+        _record_diag("POST", url2, body2, 0, f"Falha de conexão: {e}")
+        if not st.session_state.get("compat_mode", True):
+            return {"error": True, "status": 0, "text": str(e)}
 
-    # Propaga 400 (payload/JQL), 401/403 (auth/permissão), etc.
-    return {"error": True, "status": r.status_code, "text": r.text}
+    # 3) /search (fallback “clássico”) com body direto
+    url3 = f"{base}/search"
+    body3 = {
+        "jql": jql,
+        "startAt": start_at,
+        "maxResults": max_results,
+    }
+    if fields:
+        body3["fields"] = fields
+    try:
+        r3 = requests.post(url3, headers=HEADERS_JSON, auth=AUTH, json=body3, timeout=60)
+        _record_diag("POST", url3, body3, r3.status_code, r3.text)
+        if r3.status_code in (200, 201):
+            return _normalize_search_response(r3.json())
+        # 410 (removido) ou outro — retorna erro final
+        return {"error": True, "status": r3.status_code, "text": r3.text}
+    except Exception as e:
+        _record_diag("POST", url3, body3, 0, f"Falha de conexão: {e}")
+        return {"error": True, "status": 0, "text": str(e)}
 
 def buscar_todos(jql: str, fields: list[str]) -> list[dict]:
-    """Paginação até 1000 resultados."""
+    """Paginação até 1000 resultados, com cliente resiliente."""
     issues = []
     start = 0
     while True:
-        data = jira_search_jql(jql, start_at=start, max_results=100, fields=fields)
+        data = jira_search_resilient(jql, start_at=start, max_results=100, fields=fields)
         if isinstance(data, dict) and data.get("error"):
             st.warning(f"Falha JQL ({data['status']}): {data.get('text','')}")
             return issues
@@ -288,7 +350,6 @@ with c2:
 
 # ============== JQL e busca ==============
 # Ajuste os nomes exatos do projeto/status conforme aparecem na sua instância Jira.
-# Se ainda der 400, teste progressivamente: 'ORDER BY created DESC' -> 'project = FSA' -> adicionar status.
 JQL_ALL = 'project = FSA AND status in ("AGENDAMENTO","Agendado","TEC-CAMPO") ORDER BY created DESC'
 issues_raw = buscar_todos(JQL_ALL, FIELDS)
 
@@ -299,6 +360,16 @@ df = pd.DataFrame(parsed)
 for col in EXPECTED_COLS:
     if col not in df.columns:
         df[col] = pd.Series(dtype="object")
+
+# Mostra diagnóstico quando não há resultados e houve erro recente
+if df.empty and st.session_state.get("_last_diag"):
+    with st.expander("🩺 Diagnóstico da última chamada Jira", expanded=False):
+        d = st.session_state["_last_diag"]
+        st.code(
+            f"METHOD: {d['method']}\nURL: {d['url']}\n\nPAYLOAD:\n{d['payload']}\n\nSTATUS: {d['status']}\nRESPONSE:\n{d['response']}",
+            language="text"
+        )
+        st.caption("Dica: teste JQL simples como `ORDER BY created DESC` ou apenas `project = FSA` para isolar problema de JQL.")
 
 # Filtros por status (robustos p/ vazio)
 status_upper = df["status"].astype(str).str.upper()
