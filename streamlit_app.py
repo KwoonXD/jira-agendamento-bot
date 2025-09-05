@@ -1,7 +1,8 @@
 # streamlit_app.py
 import io
 import csv
-import math
+import time
+import requests
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
@@ -108,11 +109,9 @@ JQL_RESOLVIDOS_BASE = (
 # Funções auxiliares
 # ─────────────────────────────
 def parse_dt(dt_str: str):
-    """Parse ISO Jira datetime -> timezone-aware datetime (UTC)."""
     if not dt_str:
         return None
     try:
-        # Jira retorna ex.: "2025-08-21T09:00:00.000-0300"
         return datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%f%z").astimezone(timezone.utc)
     except Exception:
         try:
@@ -120,42 +119,38 @@ def parse_dt(dt_str: str):
         except Exception:
             return None
 
-
 def loja_from_issue(issue):
     f = issue.get("fields", {})
     return (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
 
-
 def cidade_from_issue(issue):
     return (issue.get("fields", {}) or {}).get("customfield_11994") or ""
-
 
 def uf_from_issue(issue):
     return ((issue.get("fields", {}) or {}).get("customfield_11948") or {}).get("value") or ""
 
+def cep_from_issue(issue):
+    return (issue.get("fields", {}) or {}).get("customfield_11993") or ""
+
+def endereco_from_issue(issue):
+    return (issue.get("fields", {}) or {}).get("customfield_12271") or ""
 
 def updated_from_issue(issue):
     return parse_dt((issue.get("fields", {}) or {}).get("updated"))
 
-
 def created_from_issue(issue):
     return parse_dt((issue.get("fields", {}) or {}).get("created"))
-
 
 def resolutiondate_from_issue(issue):
     return parse_dt((issue.get("fields", {}) or {}).get("resolutiondate"))
 
-
 def is_loja_critica(loja_data):
     """Critério de alerta: >=5 chamados OU (sem atualização há 7+ dias)."""
     qtd = loja_data.get("qtd", 0)
-    last_upd = loja_data.get("last_updated")   # datetime (UTC) ou None
+    last_upd = loja_data.get("last_updated")
     stale = False
     if last_upd:
         stale = (datetime.now(timezone.utc) - last_upd) > timedelta(days=7)
-    else:
-        # sem last_updated conhecido — considerar como não stale
-        stale = False
     return (qtd >= 5) or stale
 
 
@@ -179,7 +174,7 @@ jql_res = JQL_RESOLVIDOS_BASE.format(
 )
 resolvidos_raw, dbg_res = jira.buscar_chamados_enhanced(jql_res, FIELDS, page_size=600)
 
-# Agrupamentos existentes (mantidos)
+# Agrupamentos existentes
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
 grouped_sched = defaultdict(lambda: defaultdict(list))
@@ -222,7 +217,8 @@ for issue in combo_raw:
 
     if loja not in contagem_por_loja:
         contagem_por_loja[loja] = {
-            "cidade": cidade, "uf": uf, "qtd": 0, "last_updated": upd
+            "cidade": cidade, "uf": uf, "qtd": 0, "last_updated": upd,
+            "endereco": endereco_from_issue(issue), "cep": cep_from_issue(issue)
         }
     contagem_por_loja[loja]["qtd"] += 1
     if cidade and not contagem_por_loja[loja]["cidade"]:
@@ -231,6 +227,11 @@ for issue in combo_raw:
         contagem_por_loja[loja]["uf"] = uf
     if upd and (contagem_por_loja[loja]["last_updated"] is None or upd > contagem_por_loja[loja]["last_updated"]):
         contagem_por_loja[loja]["last_updated"] = upd
+    # se algum issue tiver endereço/cep melhor, mantém
+    if not contagem_por_loja[loja]["endereco"] and endereco_from_issue(issue):
+        contagem_por_loja[loja]["endereco"] = endereco_from_issue(issue)
+    if not contagem_por_loja[loja]["cep"] and cep_from_issue(issue):
+        contagem_por_loja[loja]["cep"] = cep_from_issue(issue)
 
 # Base para Top 5
 top_list = sorted(
@@ -402,10 +403,150 @@ st.title("📱 Painel Field Service")
 
 
 # ─────────────────────────────
-# Abas: Visão Geral | Detalhes
+# ABAS (ordem nova): 📋 Chamados | 📊 Visão Geral
 # ─────────────────────────────
-tab_overview, tab_details = st.tabs(["📊 Visão Geral", "📋 Detalhes"])
+tab_details, tab_overview = st.tabs(["📋 Chamados", "📊 Visão Geral"])
 
+
+# ============================
+# 📋 Chamados (Detalhes)
+# ============================
+with tab_details:
+    # ── SEÇÃO: Lojas com N+ chamados (colapsável) ──
+    st.subheader("🏷️ Lojas com N+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO)")
+    with st.expander("Abrir/Fechar destaques", expanded=False):
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+        threshold = c1.number_input("Mín. chamados", min_value=2, max_value=50, value=int(st.session_state.filters["threshold"]), step=1)
+        order_opt = c2.selectbox("Ordenar por", ["Chamados ↓", "Loja ↑", "Cidade ↑"])
+        uf_filter = c3.text_input("Filtrar UF", value=st.session_state.filters["uf"])
+        busca_loja = c4.text_input("Buscar loja/cidade", value=st.session_state.filters["q"], placeholder="Digite parte do nome...")
+
+        st.session_state.filters.update({"threshold": int(threshold), "uf": uf_filter, "q": busca_loja})
+
+        destaques = []
+        for loja, data in contagem_por_loja.items():
+            if data["qtd"] >= threshold:
+                row = {
+                    "Loja": loja,
+                    "Cidade": data["cidade"],
+                    "UF": data["uf"],
+                    "Chamados": data["qtd"],
+                    "Últ. atualização": data["last_updated"].astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M") if data["last_updated"] else "—",
+                    "⚠️": "🔴" if is_loja_critica(data) else "",
+                }
+                destaques.append(row)
+
+        destaques = [
+            r for r in destaques
+            if (not uf_filter or (r["UF"] or "").upper() == uf_filter.strip().upper())
+            and (not busca_loja or busca_loja.lower() in (r["Loja"] or "").lower()
+                 or busca_loja.lower() in (r["Cidade"] or "").lower())
+        ]
+
+        if order_opt == "Chamados ↓":
+            destaques.sort(key=lambda x: (-x["Chamados"], x["Loja"]))
+        elif order_opt == "Loja ↑":
+            destaques.sort(key=lambda x: (x["Loja"], -x["Chamados"]))
+        else:
+            destaques.sort(key=lambda x: (x["Cidade"] or "", x["Loja"]))
+
+        st.caption(f"{len(destaques)} loja(s) encontradas após filtros.")
+        st.dataframe(destaques, use_container_width=True, hide_index=True)
+
+        if destaques:
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=["Loja", "Cidade", "UF", "Chamados", "Últ. atualização", "⚠️"])
+            writer.writeheader()
+            writer.writerows(destaques)
+            st.download_button(
+                "⬇️ Baixar CSV",
+                data=output.getvalue().encode("utf-8"),
+                file_name=f"lojas_destaque_{threshold}+_{datetime.now():%Y%m%d_%H%M%S}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("Nenhuma loja atende aos filtros no momento.")
+
+    st.markdown("")
+
+    # ── Sub-abas: Pendentes | Agendados | TEC-CAMPO ──
+    tab1, tab2, tab3 = st.tabs(["⏳ Pendentes de Agendamento", "📋 Agendados", "🧰 TEC-CAMPO"])
+
+    with tab1:
+        filtro_loja_pend = st.text_input("🔎 Filtrar por loja (código ou cidade) — Pendentes", "")
+        if not pendentes_raw:
+            st.warning("Nenhum chamado em **AGENDAMENTO**.")
+        else:
+            for loja, iss in sorted(jira.agrupar_chamados(pendentes_raw).items()):
+                data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
+                alerta = " 🔴" if is_loja_critica(data) else ""
+                if filtro_loja_pend:
+                    if filtro_loja_pend.lower() not in loja.lower():
+                        cidades = {x.get("cidade", "") for x in iss}
+                        if not any(filtro_loja_pend.lower() in (c or "").lower() for c in cidades):
+                            continue
+                with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s)", expanded=False):
+                    st.code(gerar_mensagem(loja, iss), language="text")
+
+    with tab2:
+        filtro_loja_ag = st.text_input("🔎 Filtrar por loja (código ou cidade) — Agendados", "")
+        if not agendados_raw:
+            st.info("Nenhum chamado em **Agendado**.")
+        else:
+            for date, stores in sorted(grouped_sched.items()):
+                total = sum(len(v) for v in stores.values())
+                st.subheader(f"{date} — {total} chamado(s)")
+                for loja, iss in sorted(stores.items()):
+                    data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
+                    alerta = " 🔴" if is_loja_critica(data) else ""
+
+                    if filtro_loja_ag and filtro_loja_ag.lower() not in loja.lower():
+                        cidades = {(x.get("fields", {}) or {}).get("customfield_11994") for x in iss}
+                        if not any(filtro_loja_ag.lower() in (c or "").lower() for c in cidades):
+                            continue
+
+                    detalhes = jira.agrupar_chamados(iss)[loja]
+                    dup_keys = [d["key"] for d in detalhes
+                                if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
+
+                    spare_raw, _ = jira.buscar_chamados_enhanced(
+                        f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = "{loja}"',
+                        FIELDS, page_size=100
+                    )
+                    spare_keys = [i["key"] for i in spare_raw]
+
+                    tags = []
+                    if spare_keys: tags.append("Spare: " + ", ".join(spare_keys))
+                    if dup_keys:   tags.append("Dup: " + ", ".join(dup_keys))
+                    tag_str = f" [{' • '.join(tags)}]" if tags else ""
+
+                    with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
+                        st.markdown("**FSAs:** " + ", ".join(d["key"] for d in detalhes))
+                        st.code(gerar_mensagem(loja, detalhes), language="text")
+
+    with tab3:  # TEC-CAMPO
+        filtro_loja_tc = st.text_input("🔎 Filtrar por loja (código ou cidade) — TEC-CAMPO", "")
+        if not tec_raw:
+            st.info("Nenhum chamado em **TEC-CAMPO**.")
+        else:
+            for loja, iss in sorted(agrup_tec.items()):
+                data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
+                alerta = " 🔴" if is_loja_critica(data) else ""
+                if filtro_loja_tc:
+                    if filtro_loja_tc.lower() not in loja.lower():
+                        cidades = {x.get("cidade", "") for x in iss}
+                        if not any(filtro_loja_tc.lower() in (c or "").lower() for c in cidades):
+                            continue
+                with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s)", expanded=False):
+                    st.code(gerar_mensagem(loja, iss), language="text")
+
+    st.markdown("---")
+    st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+
+
+# ============================
+# 📊 Visão Geral
+# ============================
 with tab_overview:
     # ── Presets de Filtros (favoritos) ──
     with st.expander("🔖 Favoritos / Filtros salvos"):
@@ -463,16 +604,20 @@ with tab_overview:
     # ── Gráfico de Tendência (Novos vs Resolvidos) ──
     st.subheader("📈 Tendência (últimos dias)")
     # base de datas
-    all_days = pd.date_range(from_dt.date(), to_dt.date(), freq="D", tz=timezone.utc)
+    all_days = pd.date_range(
+        (datetime.now() - timedelta(days=int(st.session_state.filters["days"]))).date(),
+        datetime.now().date(),
+        freq="D"
+    )
 
-    # Novos: por created (apenas issues na visão combinada, o suficiente para monitorar abertos)
+    # Novos: por created (usando combo_raw — aberto na janela)
     novos = [created_from_issue(i) for i in combo_raw]
-    novos = [d for d in novos if d and (from_dt <= d <= to_dt)]
+    novos = [d for d in novos if d and (datetime.now(timezone.utc) - d) <= timedelta(days=int(st.session_state.filters["days"]))]
     df_novos = pd.Series(1, index=[d.date() for d in novos]).groupby(level=0).sum() if novos else pd.Series(dtype=int)
 
-    # Resolvidos: por resolutiondate (busca separada)
+    # Resolvidos: por resolutiondate
     resd = [resolutiondate_from_issue(i) for i in resolvidos_raw]
-    resd = [d for d in resd if d and (from_dt <= d <= to_dt)]
+    resd = [d for d in resd if d and (datetime.now(timezone.utc) - d) <= timedelta(days=int(st.session_state.filters["days"]))]
     df_res = pd.Series(1, index=[d.date() for d in resd]).groupby(level=0).sum() if resd else pd.Series(dtype=int)
 
     df = pd.DataFrame({
@@ -484,168 +629,78 @@ with tab_overview:
 
     st.markdown("")
 
-    # ── Heatmap / Mapa (opcional por geocache) ──
-    st.subheader("🗺️ Mapa / Heatmap de lojas (opcional)")
-    st.caption("Envie um CSV com colunas **Loja,lat,lon** para habilitar o mapa.")
-    geo_file = st.file_uploader("Geo cache CSV (Loja,lat,lon)", type=["csv"], accept_multiple_files=False)
-    if geo_file is not None:
-        geo_df = pd.read_csv(geo_file)
-        # normaliza coluna
-        geo_df["Loja"] = geo_df["Loja"].astype(str).str.strip()
-        heat_rows = []
-        for loja, data in contagem_por_loja.items():
-            match = geo_df[geo_df["Loja"] == str(loja)]
-            if not match.empty:
-                lat = float(match.iloc[0]["lat"])
-                lon = float(match.iloc[0]["lon"])
-                # repete ponto proporcional a qtd (para heat)
-                reps = max(1, int(data["qtd"]))
-                heat_rows += [{"lat": lat, "lon": lon} for _ in range(reps)]
-        if heat_rows:
-            st.map(pd.DataFrame(heat_rows), use_container_width=True)
+    # ── Heatmap: geocodificação automática via Jira (endereço/cep) ──
+    st.subheader("🗺️ Heatmap de lojas (auto, via endereço/CEP do Jira)")
+
+    @st.cache_data(ttl=60*60*24, show_spinner=False)
+    def geocode_nominatim(q: str):
+        """Geocodifica uma query textual via OSM Nominatim (cache 24h)."""
+        url = "https://nominatim.openstreetmap.org/search"
+        headers = {"User-Agent": "FieldServiceDashboard/1.0 (contact: ops@empresa.com)"}
+        params = {"q": q, "format": "json", "limit": 1, "countrycodes": "br"}
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=10)
+            if r.status_code == 200 and r.json():
+                item = r.json()[0]
+                return float(item["lat"]), float(item["lon"])
+        except Exception:
+            return None
+        return None
+
+    # Se preferir Google Geocoding, habilite aqui e adicione st.secrets["GOOGLE_MAPS_KEY"]
+    # def geocode_google(q: str):
+    #     key = st.secrets.get("GOOGLE_MAPS_KEY")
+    #     if not key: return None
+    #     url = "https://maps.googleapis.com/maps/api/geocode/json"
+    #     params = {"address": q, "key": key, "region": "br"}
+    #     try:
+        #         r = requests.get(url, params=params, timeout=10)
+        #         js = r.json()
+        #         if js.get("status") == "OK":
+        #             loc = js["results"][0]["geometry"]["location"]
+        #             return loc["lat"], loc["lng"]
+        #     except Exception:
+        #         return None
+        #     return None
+
+    # Monta queries únicas por loja (endereço/cidade/UF/CEP)
+    pontos = []
+    lojas_unicas = []
+    for loja, data in contagem_por_loja.items():
+        end = (data.get("endereco") or "").strip()
+        cid = (data.get("cidade") or "").strip()
+        uf  = (data.get("uf") or "").strip()
+        cep = (data.get("cep") or "").strip()
+        if not any([end, cid, uf, cep]):
+            continue
+        q = ", ".join([x for x in [end, cid, uf] if x]) + (f", {cep}" if cep else "") + ", Brasil"
+        lojas_unicas.append((loja, q, data["qtd"]))
+
+    with st.expander("⚙️ Configurar geocodificação", expanded=False):
+        st.caption("Usa Nominatim (OSM) com cache de 24h. Recomendado manter uso moderado.")
+        max_geocode = st.slider("Máximo de lojas para geocodificar por execução", 10, 500, min(100, len(lojas_unicas)))
+        pause = st.slider("Pausa entre chamadas (segundos)", 0.0, 2.0, 0.5, 0.1)
+        run_geo = st.checkbox("Executar geocodificação agora", value=True)
+
+    if run_geo and lojas_unicas:
+        geocoded = 0
+        for loja, query, peso in lojas_unicas[:max_geocode]:
+            coords = geocode_nominatim(query)  # ou geocode_google(query)
+            if coords:
+                lat, lon = coords
+                # repete ponto proporcional a qtd de chamados (efeito heat)
+                pontos += [{"lat": lat, "lon": lon} for _ in range(max(1, int(peso)))]
+            geocoded += 1
+            if pause > 0:
+                time.sleep(pause)
+
+        if pontos:
+            st.map(pd.DataFrame(pontos), use_container_width=True)
         else:
-            st.info("Nenhuma correspondência entre lojas e o CSV fornecido.")
+            st.info("Nenhuma loja geocodificada com sucesso nesta execução.")
+        st.caption(f"Geocodificadas: {geocoded} / {len(lojas_unicas)} loja(s)")
     else:
-        st.info("Sem geocache, o mapa fica opcional. Envie um CSV para visualizar geolocalização.")
-
-    st.markdown("---")
-    st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
-
-
-with tab_details:
-    # ── SEÇÃO: Lojas com N+ chamados (colapsável) ──
-    st.subheader("🏷️ Lojas com N+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO)")
-    with st.expander("Abrir/Fechar destaques", expanded=False):
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-        threshold = c1.number_input("Mín. chamados", min_value=2, max_value=50, value=int(st.session_state.filters["threshold"]), step=1)
-        order_opt = c2.selectbox("Ordenar por", ["Chamados ↓", "Loja ↑", "Cidade ↑"])
-        uf_filter = c3.text_input("Filtrar UF", value=st.session_state.filters["uf"])
-        busca_loja = c4.text_input("Buscar loja/cidade", value=st.session_state.filters["q"], placeholder="Digite parte do nome...")
-
-        # salva os ajustes no estado global de filtros
-        st.session_state.filters.update({"threshold": int(threshold), "uf": uf_filter, "q": busca_loja})
-
-        destaques = []
-        for loja, data in contagem_por_loja.items():
-            if data["qtd"] >= threshold:
-                row = {
-                    "Loja": loja,
-                    "Cidade": data["cidade"],
-                    "UF": data["uf"],
-                    "Chamados": data["qtd"],
-                    "Últ. atualização": data["last_updated"].astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M") if data["last_updated"] else "—",
-                    "⚠️": "🔴" if is_loja_critica(data) else "",
-                }
-                destaques.append(row)
-
-        # filtros
-        destaques = [
-            r for r in destaques
-            if (not uf_filter or (r["UF"] or "").upper() == uf_filter.strip().upper())
-            and (not busca_loja or busca_loja.lower() in (r["Loja"] or "").lower()
-                 or busca_loja.lower() in (r["Cidade"] or "").lower())
-        ]
-
-        # ordenação
-        if order_opt == "Chamados ↓":
-            destaques.sort(key=lambda x: (-x["Chamados"], x["Loja"]))
-        elif order_opt == "Loja ↑":
-            destaques.sort(key=lambda x: (x["Loja"], -x["Chamados"]))
-        else:
-            destaques.sort(key=lambda x: (x["Cidade"] or "", x["Loja"]))
-
-        st.caption(f"{len(destaques)} loja(s) encontradas após filtros.")
-        st.dataframe(destaques, use_container_width=True, hide_index=True)
-
-        # Download CSV
-        if destaques:
-            output = io.StringIO()
-            writer = csv.DictWriter(output, fieldnames=["Loja", "Cidade", "UF", "Chamados", "Últ. atualização", "⚠️"])
-            writer.writeheader()
-            writer.writerows(destaques)
-            st.download_button(
-                "⬇️ Baixar CSV",
-                data=output.getvalue().encode("utf-8"),
-                file_name=f"lojas_destaque_{threshold}+_{datetime.now():%Y%m%d_%H%M%S}.csv",
-                mime="text/csv"
-            )
-        else:
-            st.info("Nenhuma loja atende aos filtros no momento.")
-
-    st.markdown("")
-
-    # ── Sub-abas: Pendentes | Agendados | TEC-CAMPO ──
-    tab1, tab2, tab3 = st.tabs(["⏳ Pendentes de Agendamento", "📋 Agendados", "🧰 TEC-CAMPO"])
-
-    with tab1:
-        filtro_loja_pend = st.text_input("🔎 Filtrar por loja (código ou cidade) — Pendentes", "")
-        if not pendentes_raw:
-            st.warning("Nenhum chamado em **AGENDAMENTO**.")
-        else:
-            for loja, iss in sorted(jira.agrupar_chamados(pendentes_raw).items()):
-                # alerta visual no título da loja
-                data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
-                alerta = " 🔴" if is_loja_critica(data) else ""
-                if filtro_loja_pend:
-                    if filtro_loja_pend.lower() not in loja.lower():
-                        cidades = {x.get("cidade", "") for x in iss}
-                        if not any(filtro_loja_pend.lower() in (c or "").lower() for c in cidades):
-                            continue
-                with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s)", expanded=False):
-                    st.code(gerar_mensagem(loja, iss), language="text")
-
-    with tab2:
-        filtro_loja_ag = st.text_input("🔎 Filtrar por loja (código ou cidade) — Agendados", "")
-        if not agendados_raw:
-            st.info("Nenhum chamado em **Agendado**.")
-        else:
-            for date, stores in sorted(grouped_sched.items()):
-                total = sum(len(v) for v in stores.values())
-                st.subheader(f"{date} — {total} chamado(s)")
-                for loja, iss in sorted(stores.items()):
-                    data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
-                    alerta = " 🔴" if is_loja_critica(data) else ""
-
-                    if filtro_loja_ag and filtro_loja_ag.lower() not in loja.lower():
-                        cidades = {(x.get("fields", {}) or {}).get("customfield_11994") for x in iss}
-                        if not any(filtro_loja_ag.lower() in (c or "").lower() for c in cidades):
-                            continue
-
-                    detalhes = jira.agrupar_chamados(iss)[loja]
-                    dup_keys = [d["key"] for d in detalhes
-                                if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
-
-                    # (opcional) issues de Spare para a loja
-                    spare_raw, _ = jira.buscar_chamados_enhanced(
-                        f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = "{loja}"',
-                        FIELDS, page_size=100
-                    )
-                    spare_keys = [i["key"] for i in spare_raw]
-
-                    tags = []
-                    if spare_keys: tags.append("Spare: " + ", ".join(spare_keys))
-                    if dup_keys:   tags.append("Dup: " + ", ".join(dup_keys))
-                    tag_str = f" [{' • '.join(tags)}]" if tags else ""
-
-                    with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
-                        st.markdown("**FSAs:** " + ", ".join(d["key"] for d in detalhes))
-                        st.code(gerar_mensagem(loja, detalhes), language="text")
-
-    with tab3:  # TEC-CAMPO
-        filtro_loja_tc = st.text_input("🔎 Filtrar por loja (código ou cidade) — TEC-CAMPO", "")
-        if not tec_raw:
-            st.info("Nenhum chamado em **TEC-CAMPO**.")
-        else:
-            for loja, iss in sorted(agrup_tec.items()):
-                data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
-                alerta = " 🔴" if is_loja_critica(data) else ""
-                if filtro_loja_tc:
-                    if filtro_loja_tc.lower() not in loja.lower():
-                        cidades = {x.get("cidade", "") for x in iss}
-                        if not any(filtro_loja_tc.lower() in (c or "").lower() for c in cidades):
-                            continue
-                with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s)", expanded=False):
-                    st.code(gerar_mensagem(loja, iss), language="text")
+        st.info("Ative “Executar geocodificação agora” para gerar o mapa.")
 
     st.markdown("---")
     st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
