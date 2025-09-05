@@ -2,6 +2,7 @@
 # -----------------
 # Painel Field Service (Jira) + Heatmap gratuito (Nominatim/OSM)
 # ✅ Usa APENAS o endpoint novo /rest/api/3/search/jql (evita erro 410)
+# ✅ Corrigido payload: "fields" no TOPO do body (evita 400 Invalid request payload)
 # ✅ Tolerante a DF vazio e campos ausentes
 # ✅ Botão para gerar mapa (sem reload), cache 24h + cache em disco
 # ✅ Toggle de auto-refresh na sidebar
@@ -114,7 +115,7 @@ def _normalize_search_response(j: dict) -> dict:
         first = res[0]
         if isinstance(first, dict) and isinstance(first.get("issues"), list):
             return {"issues": first["issues"]}
-    # fallback seguro (alguns proxies retornam diretamente "issues")
+    # fallback (alguns proxies podem retornar "issues" direto)
     if isinstance(j.get("issues"), list):
         return {"issues": j["issues"]}
     return {"issues": []}
@@ -122,7 +123,7 @@ def _normalize_search_response(j: dict) -> dict:
 def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields: list[str] | None = None) -> dict:
     """
     Usa SOMENTE o endpoint moderno POST /rest/api/3/search/jql (evita 410).
-    Payload correto usa a chave "query" (não "jql").
+    ⚠️ Importante: "fields" deve ficar NO TOPO do body, não dentro do item de queries.
     Retorna sempre {"issues":[...]} ou {"error":True,"status":...,"text":...}
     """
     base = jira_base()
@@ -130,13 +131,13 @@ def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields:
 
     body = {
         "queries": [{
-            "query": jql,          # <-- chave correta
+            "query": jql,          # chave correta
             "startAt": start_at,
             "maxResults": max_results,
         }]
     }
     if fields:
-        body["queries"][0]["fields"] = fields
+        body["fields"] = fields  # <-- fields no topo (correção do 400)
 
     try:
         r = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=body, timeout=60)
