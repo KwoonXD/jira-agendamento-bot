@@ -48,15 +48,14 @@ if not who:
     )
     st.stop()
 
-# ── Campos (string funciona; a lib converte p/ lista) ──
+# ── Campos ──
 FIELDS = (
     "summary,customfield_14954,customfield_14829,customfield_14825,"
     "customfield_12374,customfield_12271,customfield_11993,"
     "customfield_11994,customfield_11948,customfield_12036,customfield_12279"
 )
 
-# ── JQLs com nomes exatos de status que você listou ──
-# IDs (se preferir): AGENDAMENTO=11499, AGENDADO=11481, TEC-CAMPO=11500, Aguardando Spare=11567
+# ── JQLs (nomes confirmados; se preferir IDs, ver combo abaixo) ──
 JQL_PEND = 'project = FSA AND status = "AGENDAMENTO" ORDER BY updated DESC'
 JQL_AG   = 'project = FSA AND status = "Agendado" ORDER BY updated DESC'
 
@@ -70,6 +69,12 @@ dbg_count_ag   = jira.count_jql(JQL_AG)
 pendentes_raw, dbg_pend = jira.buscar_chamados_enhanced(JQL_PEND, FIELDS, page_size=100)
 agendados_raw, dbg_ag   = jira.buscar_chamados_enhanced(JQL_AG,   FIELDS, page_size=100)
 
+# ── NOVO: Busca combinada para contagem por loja (AGENDAMENTO + Agendado + TEC-CAMPO) ──
+# Usando IDs para robustez: AGENDAMENTO=11499, Agendado=11481, TEC-CAMPO=11500
+JQL_COMBINADA = 'project = FSA AND status in (11499,11481,11500)'
+combo_raw, dbg_combo = jira.buscar_chamados_enhanced(JQL_COMBINADA, FIELDS, page_size=200)
+
+# Agrupa para as colunas existentes
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
 
 grouped_sched = defaultdict(lambda: defaultdict(list))
@@ -127,6 +132,7 @@ with st.sidebar:
             "parse_ag": dbg_parse_ag,
             "count_ag": dbg_count_ag,
             "agendados": dbg_ag,
+            "combo": dbg_combo,
             "last_call": {
                 "url": jira.last_url,
                 "method": jira.last_method,
@@ -249,8 +255,40 @@ with st.sidebar:
                         st.success(f"{mv} FSAs movidos → {choice}")
                         st.session_state.history.append({"keys": sel, "from": prev})
 
-# ── Main ──
+# ── NOVA SEÇÃO (topo): Lojas com 2+ chamados (Agendamento + Agendado + Tec-Campo) ──
 st.title("📱 Painel Field Service")
+
+st.markdown("### 🏷️ Lojas com 2+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO)")
+# Conta por loja (pega cidade da última ocorrência)
+contagem_por_loja = {}
+for issue in combo_raw:
+    f = issue.get("fields", {})
+    loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
+    cidade = f.get("customfield_11994") or ""
+    if loja not in contagem_por_loja:
+        contagem_por_loja[loja] = {"cidade": cidade, "qtd": 0}
+    contagem_por_loja[loja]["qtd"] += 1
+    # se cidade vier vazia antes e agora vier preenchida, atualiza
+    if not contagem_por_loja[loja]["cidade"] and cidade:
+        contagem_por_loja[loja]["cidade"] = cidade
+
+destaques = [
+    (loja, data["cidade"], data["qtd"])
+    for loja, data in contagem_por_loja.items()
+    if data["qtd"] >= 2
+]
+destaques.sort(key=lambda x: (-x[2], x[0]))  # mais chamados primeiro
+
+if destaques:
+    # Tabela compacta
+    st.write(
+        "| Loja | Cidade | Chamados |\n|---|---|---|\n" +
+        "\n".join([f"| **{loja}** | {cidade or '—'} | **{qtd}** |" for loja, cidade, qtd in destaques])
+    )
+else:
+    st.info("Nenhuma loja com 2 ou mais chamados nesse conjunto.")
+
+# ── Colunas principais (como antes) ──
 col1, col2 = st.columns(2)
 
 with col1:
@@ -274,7 +312,7 @@ with col2:
                 detalhes = jira.agrupar_chamados(iss)[loja]
                 dup_keys = [d["key"] for d in detalhes
                             if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
-                # Spare da mesma loja
+                # Spare da mesma loja (opcional; mantém como estava)
                 spare_raw, _dbg = jira.buscar_chamados_enhanced(
                     f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = "{loja}"',
                     FIELDS, page_size=100
