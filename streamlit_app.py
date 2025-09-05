@@ -70,8 +70,9 @@ FIELDS = (
 
 JQL_PEND = 'project = FSA AND status = "AGENDAMENTO" ORDER BY updated DESC'
 JQL_AG   = 'project = FSA AND status = "Agendado" ORDER BY updated DESC'
+JQL_TC   = 'project = FSA AND status = "TEC-CAMPO" ORDER BY updated DESC'   # <— NOVO
 
-# IDs confirmados
+# IDs confirmados (para visão combinada e KPIs)
 STATUS_ID_AGENDAMENTO = 11499
 STATUS_ID_AGENDADO    = 11481
 STATUS_ID_TEC_CAMPO   = 11500
@@ -86,7 +87,8 @@ JQL_COMBINADA = (
 # ─────────────────────────────
 pendentes_raw, dbg_pend = jira.buscar_chamados_enhanced(JQL_PEND, FIELDS, page_size=150)
 agendados_raw, dbg_ag   = jira.buscar_chamados_enhanced(JQL_AG,   FIELDS, page_size=150)
-combo_raw,     dbg_combo = jira.buscar_chamados_enhanced(JQL_COMBINADA, FIELDS, page_size=300)
+tec_raw,      dbg_tc    = jira.buscar_chamados_enhanced(JQL_TC,   FIELDS, page_size=200)  # <— NOVO
+combo_raw,    dbg_combo = jira.buscar_chamados_enhanced(JQL_COMBINADA, FIELDS, page_size=400)
 
 # Agrupamentos
 agrup_pend = jira.agrupar_chamados(pendentes_raw)
@@ -102,9 +104,12 @@ for issue in agendados_raw:
     )
     grouped_sched[data_str][loja].append(issue)
 
+# TEC-CAMPO agrupado por loja (para a aba)
+agrup_tec = jira.agrupar_chamados(tec_raw)
+
 # Para “desfazer” e fluxos em massa
 raw_by_loja = defaultdict(list)
-for i in pendentes_raw + agendados_raw:
+for i in pendentes_raw + agendados_raw + tec_raw:
     loja = i["fields"].get("customfield_14954", {}).get("value", "Loja Desconhecida")
     raw_by_loja[loja].append(i)
 
@@ -130,11 +135,13 @@ with st.sidebar:
     st.markdown("---")
     st.header("Transição de Chamados")
 
+    # catálogo de lojas vem de todos os conjuntos
     lojas_pend = set(agrup_pend.keys())
     lojas_ag = set()
     for _, stores in grouped_sched.items():
         lojas_ag |= set(stores.keys())
-    lojas_cat = ["—"] + sorted(lojas_pend | lojas_ag)
+    lojas_tc = set(agrup_tec.keys())
+    lojas_cat = ["—"] + sorted(lojas_pend | lojas_ag | lojas_tc)
 
     loja_sel = st.selectbox("Selecione a loja:", lojas_cat, help="Usado nas ações em massa abaixo.")
 
@@ -143,6 +150,7 @@ with st.sidebar:
             "use_ex_api": USE_EX_API, "cloud_id": CLOUD_ID,
             "pendentes": {"count": len(pendentes_raw), **dbg_pend},
             "agendados": {"count": len(agendados_raw), **dbg_ag},
+            "tec_campo": {"count": len(tec_raw), **dbg_tc},                      # <— NOVO
             "combo": {"count": len(combo_raw), **dbg_combo},
             "last_call": {
                 "url": jira.last_url,
@@ -215,8 +223,11 @@ with st.sidebar:
             ] + [
                 i["key"] for i in agendados_raw
                 if i["fields"].get("customfield_14954", {}).get("value") == loja_sel
+            ] + [
+                i["key"] for i in tec_raw
+                if i["fields"].get("customfield_14954", {}).get("value") == loja_sel
             ]
-            sel = st.multiselect("FSAs (pend.+agend.):", sorted(set(opts)))
+            sel = st.multiselect("FSAs (pend.+agend.+tec-campo):", sorted(set(opts)))
             if sel:
                 trans_opts = {t["name"]: t["id"] for t in jira.get_transitions(sel[0])}
                 choice = st.selectbox("Transição:", ["—"] + list(trans_opts))
@@ -257,7 +268,7 @@ with st.sidebar:
 # ─────────────────────────────
 st.title("📱 Painel Field Service")
 
-# KPIs (robusto mesmo se faltar status)
+# KPIs (robustos mesmo se faltar status)
 kpi = {"AGENDAMENTO": 0, "Agendado": 0, "TEC-CAMPO": 0}
 for issue in combo_raw:
     fields = issue.get("fields") or {}
@@ -270,7 +281,7 @@ colk1.metric("⏳ AGENDAMENTO", kpi["AGENDAMENTO"])
 colk2.metric("📋 Agendado",   kpi["Agendado"])
 colk3.metric("🧰 TEC-CAMPO",  kpi["TEC-CAMPO"])
 
-# Contagem por loja/cidade/UF para destaques
+# Contagem por loja/cidade/UF para destaques (usando visão combinada)
 contagem_por_loja = {}
 for issue in combo_raw:
     f = issue.get("fields", {})
@@ -346,9 +357,9 @@ with st.expander(
 
 
 # ─────────────────────────────
-# Abas: Pendentes | Agendados
+# Abas: Pendentes | Agendados | TEC-CAMPO
 # ─────────────────────────────
-tab1, tab2 = st.tabs(["⏳ Pendentes de Agendamento", "📋 Agendados"])
+tab1, tab2, tab3 = st.tabs(["⏳ Pendentes de Agendamento", "📋 Agendados", "🧰 TEC-CAMPO"])  # <— NOVO
 
 with tab1:
     filtro_loja_pend = st.text_input("🔎 Filtrar por loja (código ou cidade) — Pendentes", "")
@@ -374,7 +385,7 @@ with tab2:
             st.subheader(f"{date} — {total} chamado(s)")
             for loja, iss in sorted(stores.items()):
                 if filtro_loja_ag and filtro_loja_ag.lower() not in loja.lower():
-                    cidades = { (x.get("fields", {}) or {}).get("customfield_11994") for x in iss }
+                    cidades = {(x.get("fields", {}) or {}).get("customfield_11994") for x in iss}
                     if not any(filtro_loja_ag.lower() in (c or "").lower() for c in cidades):
                         continue
 
@@ -396,6 +407,20 @@ with tab2:
                 with st.expander(f"{loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
                     st.markdown("**FSAs:** " + ", ".join(d["key"] for d in detalhes))
                     st.code(gerar_mensagem(loja, detalhes), language="text")
+
+with tab3:  # TEC-CAMPO
+    filtro_loja_tc = st.text_input("🔎 Filtrar por loja (código ou cidade) — TEC-CAMPO", "")
+    if not tec_raw:
+        st.info("Nenhum chamado em **TEC-CAMPO**.")
+    else:
+        for loja, iss in sorted(agrup_tec.items()):
+            if filtro_loja_tc:
+                if filtro_loja_tc.lower() not in loja.lower():
+                    cidades = {x.get("cidade", "") for x in iss}
+                    if not any(filtro_loja_tc.lower() in (c or "").lower() for c in cidades):
+                        continue
+            with st.expander(f"{loja} — {len(iss)} chamado(s)", expanded=False):
+                st.code(gerar_mensagem(loja, iss), language="text")
 
 
 # Rodapé
