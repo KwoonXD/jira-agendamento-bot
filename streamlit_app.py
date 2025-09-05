@@ -1,11 +1,9 @@
 # streamlit_app.py
 # -----------------
 # Painel Field Service (Jira) + Heatmap gratuito (Nominatim/OSM)
-# ✅ Usa APENAS o endpoint novo /rest/api/3/search/jql (evita erro 410)
-# ✅ Corrigido payload: "fields" no TOPO do body (evita 400 Invalid request payload)
-# ✅ Tolerante a DF vazio e campos ausentes
-# ✅ Botão para gerar mapa (sem reload), cache 24h + cache em disco
-# ✅ Toggle de auto-refresh na sidebar
+# ✅ /rest/api/3/search/jql com payload correto: queries[].jql + fields no topo
+# ✅ Auto-refresh opcional: tenta streamlit_autorefresh; se falhar, usa meta refresh
+# ✅ Robustez contra DF vazio / campos faltando
 
 from __future__ import annotations
 import os
@@ -16,16 +14,11 @@ import requests
 from requests.auth import HTTPBasicAuth
 import pandas as pd
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
-# =========================
-# CONFIG DA PÁGINA
-# =========================
+# ============== CONFIG PÁGINA ==============
 st.set_page_config(page_title="Painel Field Service", layout="wide", page_icon="📟")
 
-# =========================
-# ESTADO / AUTO-REFRESH
-# =========================
+# ============== AUTO-REFRESH (tolerante) ==============
 if "auto_refresh_on" not in st.session_state:
     st.session_state.auto_refresh_on = True
 
@@ -35,20 +28,27 @@ with st.sidebar:
         "🔄 Auto-refresh a cada 90s",
         value=st.session_state.auto_refresh_on,
         key="auto_refresh_on",
-        help="Desligue para operar sem recarregar a página.",
+        help="Desligue para operar sem recarregar a página."
     )
-    if st.session_state.auto_refresh_on:
-        st_autorefresh(interval=90_000, key="auto_refresh_tick")
 
-# =========================
-# SEGREDOS / CREDENCIAIS
-# =========================
-# Em .streamlit/secrets.toml:
-# EMAIL="..."
-# API_TOKEN="..."
-# SITE_URL="https://sua-instancia.atlassian.net"   # usado quando USE_EX_API=false
-# USE_EX_API=true
-# CLOUD_ID="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"   # usado quando USE_EX_API=true
+# Tenta usar o componente; se falhar, usa META refresh
+if st.session_state.auto_refresh_on:
+    used_component = False
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=90_000, key="__tick")
+        used_component = True
+    except Exception:
+        used_component = False
+    if not used_component:
+        # Fallback: meta refresh a cada 90s sem dependências externas
+        st.markdown(
+            """<meta http-equiv="refresh" content="90">""",
+            unsafe_allow_html=True
+        )
+        st.caption("⏱️ Auto-refresh por fallback (meta refresh).")
+
+# ============== SEGREDOS / CREDENCIAIS ==============
 EMAIL = st.secrets.get("EMAIL", "")
 API_TOKEN = st.secrets.get("API_TOKEN", "")
 SITE_URL = st.secrets.get("SITE_URL", "").rstrip("/")
@@ -74,7 +74,7 @@ FIELDS = [
     "customfield_11993",  # CEP
     "customfield_11994",  # Cidade
     "customfield_11948",  # Estado
-    "customfield_12036",  # Data Agendada
+    "customfield_12036",  # Data Agendada (datetime)
     "customfield_12279",  # Técnicos (doc)
 ]
 EXPECTED_COLS = [
@@ -82,9 +82,7 @@ EXPECTED_COLS = [
     "data_agendada","status"
 ]
 
-# =========================
-# HELPERS JIRA
-# =========================
+# ============== HELPERS JIRA ==============
 def jira_base() -> str:
     """
     Retorna a base correta da API v3:
@@ -104,9 +102,9 @@ def jira_base() -> str:
 
 def _normalize_search_response(j: dict) -> dict:
     """
-    Normaliza a resposta do /search/jql:
+    Normaliza resposta do /search/jql:
       {"results":[{"issues":[...], ...}]}
-    Retorna {"issues":[...]} mesmo quando não há resultados.
+    Retorna {"issues":[...]} mesmo sem resultados.
     """
     if not isinstance(j, dict):
         return {"issues": []}
@@ -115,29 +113,28 @@ def _normalize_search_response(j: dict) -> dict:
         first = res[0]
         if isinstance(first, dict) and isinstance(first.get("issues"), list):
             return {"issues": first["issues"]}
-    # fallback (alguns proxies podem retornar "issues" direto)
+    # fallback (alguns proxies devolvem "issues" direto)
     if isinstance(j.get("issues"), list):
         return {"issues": j["issues"]}
     return {"issues": []}
 
 def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields: list[str] | None = None) -> dict:
     """
-    Usa SOMENTE o endpoint moderno POST /rest/api/3/search/jql (evita 410).
-    ⚠️ Importante: "fields" deve ficar NO TOPO do body, não dentro do item de queries.
-    Retorna sempre {"issues":[...]} ou {"error":True,"status":...,"text":...}
+    ✅ Usa SOMENTE POST /rest/api/3/search/jql (evita 410).
+    ✅ Payload correto: queries[].**jql** + fields no TOPO.
     """
     base = jira_base()
     url = f"{base}/search/jql"
 
     body = {
         "queries": [{
-            "query": jql,          # chave correta
+            "jql": jql,           # <- CHAVE CORRETA
             "startAt": start_at,
             "maxResults": max_results,
         }]
     }
     if fields:
-        body["fields"] = fields  # <-- fields no topo (correção do 400)
+        body["fields"] = fields  # <- fields no topo (não dentro de queries)
 
     try:
         r = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=body, timeout=60)
@@ -147,7 +144,7 @@ def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields:
     if r.status_code in (200, 201):
         return _normalize_search_response(r.json())
 
-    # Erro (ex.: 400 JQL inválida, 401/403 permissão, etc.)
+    # Propaga 400 (payload/JQL), 401/403 (auth/permissão), etc.
     return {"error": True, "status": r.status_code, "text": r.text}
 
 def buscar_todos(jql: str, fields: list[str]) -> list[dict]:
@@ -231,9 +228,7 @@ def format_msg_por_loja(loja: str, chamados: list[dict]) -> str:
         ]))
     return "\n\n".join(blocos)
 
-# =========================
-# NOMINATIM (OSM) – geocodificação gratuita
-# =========================
+# ============== NOMINATIM (OSM) – geocodificação gratuita ==============
 GEOCACHE_PATH = ".geo_cache.json"
 
 def _load_disk_cache() -> dict:
@@ -283,25 +278,24 @@ def geocode_nominatim(query: str):
         return None
     return None
 
-# =========================
-# UI – TÍTULO / BUSCA
-# =========================
+# ============== UI – cabeçalho ==============
 st.title("📟 Painel Field Service")
-
 c1, c2 = st.columns([2,1])
 with c1:
     st.caption("Chamados nos status: **AGENDAMENTO • Agendado • TEC-CAMPO**")
 with c2:
     st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
 
-# JQL (ajuste o nome do projeto/status conforme o seu Jira)
+# ============== JQL e busca ==============
+# Ajuste os nomes exatos do projeto/status conforme aparecem na sua instância Jira.
+# Se ainda der 400, teste progressivamente: 'ORDER BY created DESC' -> 'project = FSA' -> adicionar status.
 JQL_ALL = 'project = FSA AND status in ("AGENDAMENTO","Agendado","TEC-CAMPO") ORDER BY created DESC'
 issues_raw = buscar_todos(JQL_ALL, FIELDS)
 
 parsed = [parse_issue(i) for i in issues_raw]
 df = pd.DataFrame(parsed)
 
-# Garante colunas mesmo se vazio (evita KeyError)
+# Garante colunas (evita KeyError em DF vazio)
 for col in EXPECTED_COLS:
     if col not in df.columns:
         df[col] = pd.Series(dtype="object")
@@ -316,14 +310,10 @@ df_teccampo    = df[status_upper == "TEC-CAMPO"]
 agr = df.groupby(["loja","cidade"], dropna=False)["key"].count().reset_index().rename(columns={"key":"chamados"})
 hot = agr[agr["chamados"]>=2].sort_values(["chamados","loja"], ascending=[False,True])
 
-# =========================
-# TABS – Chamados / Visão Geral
-# =========================
+# ============== TABS – Chamados / Visão Geral ==============
 tab1, tab2 = st.tabs(["📋 Chamados", "📊 Visão Geral"])
 
-# -------------------------
-# 📋 CHAMADOS
-# -------------------------
+# ---- 📋 CHAMADOS ----
 with tab1:
     st.subheader("🔎 Resumo por status")
     mc1, mc2, mc3 = st.columns(3)
@@ -366,9 +356,7 @@ with tab1:
             with st.expander(f"{loja} — {len(detalhes)} chamado(s)", expanded=False):
                 st.code(format_msg_por_loja(str(loja), detalhes), language="text")
 
-# -------------------------
-# 📊 VISÃO GERAL
-# -------------------------
+# ---- 📊 VISÃO GERAL ----
 with tab2:
     st.subheader("🏪 Lojas com 2+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO)")
     with st.expander(f"🔖 {len(hot)} loja(s) com 2+ chamados — ver tabela", expanded=True):
@@ -435,7 +423,7 @@ with tab2:
                 coords = geocode_nominatim(query)
                 if coords:
                     lat, lon = coords
-                    # Reforça o peso no heatmap básico do st.map
+                    # Reforça o “peso” no heatmap básico do st.map
                     pontos += [{"lat": lat, "lon": lon} for _ in range(max(1, int(peso)))]
                 geocoded += 1
                 if pause > 0:
