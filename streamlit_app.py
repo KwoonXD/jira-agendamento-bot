@@ -259,29 +259,32 @@ with st.sidebar:
 # ── TÍTULO ──
 st.title("📱 Painel Field Service")
 
-# ── SEÇÃO DESTACADA: Lojas com 2+ chamados ──
-with st.container():
-    st.subheader("🏷️ Lojas com 2+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO)")
+# ── TÍTULO ──
+st.title("📱 Painel Field Service")
 
-    # Contagem por loja (e cidade)
-    contagem_por_loja = {}
-    for issue in combo_raw:
-        f = issue.get("fields", {})
-        loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
-        cidade = f.get("customfield_11994") or ""
-        if loja not in contagem_por_loja:
-            contagem_por_loja[loja] = {"cidade": cidade, "qtd": 0}
-        contagem_por_loja[loja]["qtd"] += 1
-        if not contagem_por_loja[loja]["cidade"] and cidade:
-            contagem_por_loja[loja]["cidade"] = cidade
+# ── SEÇÃO DESTACADA (MINIMIZÁVEL): Lojas com 2+ chamados ──
+# Monta a lista antes para conseguirmos mostrar a contagem no título do expander
+contagem_por_loja = {}
+for issue in combo_raw:
+    f = issue.get("fields", {})
+    loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
+    cidade = f.get("customfield_11994") or ""
+    if loja not in contagem_por_loja:
+        contagem_por_loja[loja] = {"cidade": cidade, "qtd": 0}
+    contagem_por_loja[loja]["qtd"] += 1
+    if not contagem_por_loja[loja]["cidade"] and cidade:
+        contagem_por_loja[loja]["cidade"] = cidade
 
-    destaques = [
-        {"Loja": loja, "Cidade": data["cidade"], "Chamados": data["qtd"]}
-        for loja, data in contagem_por_loja.items()
-        if data["qtd"] >= 2
-    ]
-    destaques.sort(key=lambda x: (-x["Chamados"], x["Loja"]))
+destaques = [
+    {"Loja": loja, "Cidade": data["cidade"], "Chamados": data["qtd"]}
+    for loja, data in contagem_por_loja.items()
+    if data["qtd"] >= 2
+]
+destaques.sort(key=lambda x: (-x["Chamados"], x["Loja"]))
 
+exp_title = f"🏷️ Lojas com 2+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO) — {len(destaques)} loja(s)"
+
+with st.expander(exp_title, expanded=False):
     if destaques:
         st.dataframe(
             destaques,
@@ -290,6 +293,7 @@ with st.container():
         )
     else:
         st.info("Nenhuma loja com 2 ou mais chamados nesse conjunto.")
+
 
 # ── Colunas principais ──
 col1, col2 = st.columns(2)
