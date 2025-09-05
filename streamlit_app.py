@@ -1,7 +1,9 @@
 # streamlit_app.py
 # -----------------
-# Painel Field Service (Jira) + Heatmap com geocodificação gratuita (Nominatim/OSM)
-# Seguro contra JQL 400, DataFrame vazio e campos ausentes.
+# Painel Field Service (Jira) + Heatmap gratuito (Nominatim/OSM)
+# -> Corrigido para usar o endpoint novo **/rest/api/3/search/jql** quando disponível
+#    e, se falhar, cair para POST /search e por fim GET /search (compat).
+# -> À prova de erros (410 / 400), DF vazio e campos ausentes.
 
 from __future__ import annotations
 import os
@@ -79,8 +81,6 @@ EXPECTED_COLS = [
     "data_agendada","status"
 ]
 
-STATUSES_INTERESSADOS = ["AGENDAMENTO","Agendado","TEC-CAMPO"]
-
 # =========================
 # HELPERS JIRA
 # =========================
@@ -96,35 +96,82 @@ def jira_base() -> str:
             st.stop()
         return f"{SITE_URL}/rest/api/3"
 
+def _normalize_search_response(j: dict) -> dict:
+    """
+    Normaliza diferentes formatos de resposta:
+    - /search -> {"issues":[...]}
+    - /search/jql -> {"results":[{"issues":[...]}]}
+    Retorna {"issues":[...]} ou {"issues":[]}
+    """
+    if not isinstance(j, dict):
+        return {"issues": []}
+    if "issues" in j and isinstance(j["issues"], list):
+        return {"issues": j["issues"]}
+    if "results" in j and isinstance(j["results"], list) and j["results"]:
+        first = j["results"][0]
+        if isinstance(first, dict) and "issues" in first and isinstance(first["issues"], list):
+            return {"issues": first["issues"]}
+    return {"issues": []}
+
 def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields: list[str] | None = None) -> dict:
     """
-    Tenta POST /search (body JSON). Se o tenant retornar 400, cai no fallback GET /search.
-    Retorna dict com 'issues' ou {'error': True, 'status': code, 'text': body}.
+    Ordem de tentativa:
+      1) POST /rest/api/3/search/jql (novo)  -> body {"queries":[{ "jql":..., "startAt":..., "maxResults":..., "fields":[...] }]}
+      2) POST /rest/api/3/search (legado)    -> body {"jql":..., "startAt":..., "maxResults":..., "fields":[...]}
+      3) GET  /rest/api/3/search (compat)    -> params jql, startAt, maxResults, fields="a,b,c"
+    Sempre devolve {"issues":[...]} ou {"error":True,"status":...,"text":...}
     """
     base = jira_base()
 
-    # 1) Tenta POST /search
+    # 1) Novo endpoint /search/jql (evita 410)
+    try:
+        url_jql = f"{base}/search/jql"
+        j_body = {
+            "queries": [{
+                "jql": jql,
+                # alguns tenants usam "query" em vez de "jql" — duplicamos por segurança
+                "query": jql,
+                "startAt": start_at,
+                "maxResults": max_results,
+            }]
+        }
+        if fields:
+            j_body["queries"][0]["fields"] = fields
+        r = requests.post(url_jql, headers=HEADERS_JSON, auth=AUTH, json=j_body, timeout=60)
+        if r.status_code in (200, 201):
+            return _normalize_search_response(r.json())
+        # Se 400/401/403/404/etc, continua para fallback
+        if r.status_code == 410:
+            # explicitamente removido; segue fallback
+            pass
+        else:
+            # pode acontecer de o tenant ainda não aceitar o payload; tenta fallback
+            pass
+    except Exception:
+        pass
+
+    # 2) POST /search (antigo)
     try:
         url = f"{base}/search"
         payload = {"jql": jql, "startAt": start_at, "maxResults": max_results}
         if fields:
             payload["fields"] = fields
-        r = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=payload, timeout=60)
-        if r.status_code in (200, 201):
-            return r.json()
-        # Fallback se 400 ou outros
-    except Exception as e:
+        r2 = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=payload, timeout=60)
+        if r2.status_code in (200, 201):
+            return _normalize_search_response(r2.json())
+        # continua fallback
+    except Exception:
         pass
 
-    # 2) Fallback GET /search (campos como string)
+    # 3) GET /search (compat)
     try:
         params = {"jql": jql, "startAt": start_at, "maxResults": max_results}
         if fields:
             params["fields"] = ",".join(fields)
-        r2 = requests.get(url, headers=HEADERS_JSON, auth=AUTH, params=params, timeout=60)
-        if r2.status_code in (200, 201):
-            return r2.json()
-        return {"error": True, "status": r2.status_code, "text": r2.text}
+        r3 = requests.get(url, headers=HEADERS_JSON, auth=AUTH, params=params, timeout=60)
+        if r3.status_code in (200, 201):
+            return _normalize_search_response(r3.json())
+        return {"error": True, "status": r3.status_code, "text": r3.text}
     except Exception as e:
         return {"error": True, "status": 0, "text": str(e)}
 
@@ -238,7 +285,7 @@ NOMINATIM_HEADERS = {
     "User-Agent": "FieldService-Streamlit/1.0 (contact: ops@example.com)"
 }
 
-def geocode_nominatim(query: str) -> tuple[float,float] | None:
+def geocode_nominatim(query: str):
     mem = cache24h()
     disk = _load_disk_cache()
     if query in mem:
