@@ -1,15 +1,15 @@
 # streamlit_app.py
 # -----------------
 # Painel Field Service (Jira) + Heatmap gratuito (Nominatim/OSM)
-# -> Corrigido para usar o endpoint novo **/rest/api/3/search/jql** quando disponível
-#    e, se falhar, cair para POST /search e por fim GET /search (compat).
-# -> À prova de erros (410 / 400), DF vazio e campos ausentes.
+# ✅ Usa APENAS o endpoint novo /rest/api/3/search/jql (evita erro 410)
+# ✅ Tolerante a DF vazio e campos ausentes
+# ✅ Botão para gerar mapa (sem reload), cache 24h + cache em disco
+# ✅ Toggle de auto-refresh na sidebar
 
 from __future__ import annotations
 import os
 import time
 from datetime import datetime, timezone
-from collections import defaultdict
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -45,9 +45,9 @@ with st.sidebar:
 # Em .streamlit/secrets.toml:
 # EMAIL="..."
 # API_TOKEN="..."
-# SITE_URL="https://sua-instancia.atlassian.net"
+# SITE_URL="https://sua-instancia.atlassian.net"   # usado quando USE_EX_API=false
 # USE_EX_API=true
-# CLOUD_ID="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# CLOUD_ID="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"   # usado quando USE_EX_API=true
 EMAIL = st.secrets.get("EMAIL", "")
 API_TOKEN = st.secrets.get("API_TOKEN", "")
 SITE_URL = st.secrets.get("SITE_URL", "").rstrip("/")
@@ -85,6 +85,11 @@ EXPECTED_COLS = [
 # HELPERS JIRA
 # =========================
 def jira_base() -> str:
+    """
+    Retorna a base correta da API v3:
+      - EX API: https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/api/3
+      - Site local: https://{site}.atlassian.net/rest/api/3
+    """
     if USE_EX_API:
         if not CLOUD_ID:
             st.error("USE_EX_API=true, mas CLOUD_ID não foi definido em secrets.")
@@ -98,85 +103,54 @@ def jira_base() -> str:
 
 def _normalize_search_response(j: dict) -> dict:
     """
-    Normaliza diferentes formatos de resposta:
-    - /search -> {"issues":[...]}
-    - /search/jql -> {"results":[{"issues":[...]}]}
-    Retorna {"issues":[...]} ou {"issues":[]}
+    Normaliza a resposta do /search/jql:
+      {"results":[{"issues":[...], ...}]}
+    Retorna {"issues":[...]} mesmo quando não há resultados.
     """
     if not isinstance(j, dict):
         return {"issues": []}
-    if "issues" in j and isinstance(j["issues"], list):
-        return {"issues": j["issues"]}
-    if "results" in j and isinstance(j["results"], list) and j["results"]:
-        first = j["results"][0]
-        if isinstance(first, dict) and "issues" in first and isinstance(first["issues"], list):
+    res = j.get("results")
+    if isinstance(res, list) and res:
+        first = res[0]
+        if isinstance(first, dict) and isinstance(first.get("issues"), list):
             return {"issues": first["issues"]}
+    # fallback seguro (alguns proxies retornam diretamente "issues")
+    if isinstance(j.get("issues"), list):
+        return {"issues": j["issues"]}
     return {"issues": []}
 
 def jira_search_jql(jql: str, start_at: int = 0, max_results: int = 100, fields: list[str] | None = None) -> dict:
     """
-    Ordem de tentativa:
-      1) POST /rest/api/3/search/jql (novo)  -> body {"queries":[{ "jql":..., "startAt":..., "maxResults":..., "fields":[...] }]}
-      2) POST /rest/api/3/search (legado)    -> body {"jql":..., "startAt":..., "maxResults":..., "fields":[...]}
-      3) GET  /rest/api/3/search (compat)    -> params jql, startAt, maxResults, fields="a,b,c"
-    Sempre devolve {"issues":[...]} ou {"error":True,"status":...,"text":...}
+    Usa SOMENTE o endpoint moderno POST /rest/api/3/search/jql (evita 410).
+    Payload correto usa a chave "query" (não "jql").
+    Retorna sempre {"issues":[...]} ou {"error":True,"status":...,"text":...}
     """
     base = jira_base()
+    url = f"{base}/search/jql"
 
-    # 1) Novo endpoint /search/jql (evita 410)
-    try:
-        url_jql = f"{base}/search/jql"
-        j_body = {
-            "queries": [{
-                "jql": jql,
-                # alguns tenants usam "query" em vez de "jql" — duplicamos por segurança
-                "query": jql,
-                "startAt": start_at,
-                "maxResults": max_results,
-            }]
-        }
-        if fields:
-            j_body["queries"][0]["fields"] = fields
-        r = requests.post(url_jql, headers=HEADERS_JSON, auth=AUTH, json=j_body, timeout=60)
-        if r.status_code in (200, 201):
-            return _normalize_search_response(r.json())
-        # Se 400/401/403/404/etc, continua para fallback
-        if r.status_code == 410:
-            # explicitamente removido; segue fallback
-            pass
-        else:
-            # pode acontecer de o tenant ainda não aceitar o payload; tenta fallback
-            pass
-    except Exception:
-        pass
+    body = {
+        "queries": [{
+            "query": jql,          # <-- chave correta
+            "startAt": start_at,
+            "maxResults": max_results,
+        }]
+    }
+    if fields:
+        body["queries"][0]["fields"] = fields
 
-    # 2) POST /search (antigo)
     try:
-        url = f"{base}/search"
-        payload = {"jql": jql, "startAt": start_at, "maxResults": max_results}
-        if fields:
-            payload["fields"] = fields
-        r2 = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=payload, timeout=60)
-        if r2.status_code in (200, 201):
-            return _normalize_search_response(r2.json())
-        # continua fallback
-    except Exception:
-        pass
-
-    # 3) GET /search (compat)
-    try:
-        params = {"jql": jql, "startAt": start_at, "maxResults": max_results}
-        if fields:
-            params["fields"] = ",".join(fields)
-        r3 = requests.get(url, headers=HEADERS_JSON, auth=AUTH, params=params, timeout=60)
-        if r3.status_code in (200, 201):
-            return _normalize_search_response(r3.json())
-        return {"error": True, "status": r3.status_code, "text": r3.text}
+        r = requests.post(url, headers=HEADERS_JSON, auth=AUTH, json=body, timeout=60)
     except Exception as e:
-        return {"error": True, "status": 0, "text": str(e)}
+        return {"error": True, "status": 0, "text": f"Falha de conexão: {e}"}
+
+    if r.status_code in (200, 201):
+        return _normalize_search_response(r.json())
+
+    # Erro (ex.: 400 JQL inválida, 401/403 permissão, etc.)
+    return {"error": True, "status": r.status_code, "text": r.text}
 
 def buscar_todos(jql: str, fields: list[str]) -> list[dict]:
-    """Paginação até 1000."""
+    """Paginação até 1000 resultados."""
     issues = []
     start = 0
     while True:
@@ -313,15 +287,15 @@ def geocode_nominatim(query: str):
 # =========================
 st.title("📟 Painel Field Service")
 
-colf1, colf2 = st.columns([2,1])
-with colf1:
+c1, c2 = st.columns([2,1])
+with c1:
     st.caption("Chamados nos status: **AGENDAMENTO • Agendado • TEC-CAMPO**")
-with colf2:
+with c2:
     st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
 
-# JQL única (3 status)
-jql_all = 'project = FSA AND status in ("AGENDAMENTO","Agendado","TEC-CAMPO") ORDER BY created DESC'
-issues_raw = buscar_todos(jql_all, FIELDS)
+# JQL (ajuste o nome do projeto/status conforme o seu Jira)
+JQL_ALL = 'project = FSA AND status in ("AGENDAMENTO","Agendado","TEC-CAMPO") ORDER BY created DESC'
+issues_raw = buscar_todos(JQL_ALL, FIELDS)
 
 parsed = [parse_issue(i) for i in issues_raw]
 df = pd.DataFrame(parsed)
@@ -351,10 +325,10 @@ tab1, tab2 = st.tabs(["📋 Chamados", "📊 Visão Geral"])
 # -------------------------
 with tab1:
     st.subheader("🔎 Resumo por status")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("AGENDAMENTO", int(df_agendamento.shape[0]))
-    c2.metric("Agendado", int(df_agendado.shape[0]))
-    c3.metric("TEC-CAMPO", int(df_teccampo.shape[0]))
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("AGENDAMENTO", int(df_agendamento.shape[0]))
+    mc2.metric("Agendado", int(df_agendado.shape[0]))
+    mc3.metric("TEC-CAMPO", int(df_teccampo.shape[0]))
 
     st.markdown("---")
 
@@ -410,9 +384,9 @@ with tab2:
         st.info("Sem dados para o ranking.")
     else:
         top5 = hot.head(5).reset_index(drop=True)
-        kcols = st.columns(len(top5))
+        cols = st.columns(len(top5))
         for i, (_,row) in enumerate(top5.iterrows()):
-            with kcols[i]:
+            with cols[i]:
                 st.metric(f"{row['loja']} — {row['cidade']}", int(row["chamados"]))
 
     st.markdown("---")
@@ -460,6 +434,7 @@ with tab2:
                 coords = geocode_nominatim(query)
                 if coords:
                     lat, lon = coords
+                    # Reforça o peso no heatmap básico do st.map
                     pontos += [{"lat": lat, "lon": lon} for _ in range(max(1, int(peso)))]
                 geocoded += 1
                 if pause > 0:
