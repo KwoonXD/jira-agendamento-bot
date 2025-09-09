@@ -34,6 +34,12 @@ def gerar_mensagem(loja, chamados):
                 f"Cidade: {endereco_info[3]}"
             ])
         )
+    
+    # 🚨 Frase padrão no final
+    blocos.append(
+        "*SEMPRE AO CHEGAR NO LOCAL É NECESSÁRIO ACIONAR O SUPORTE E ENVIAR AS FOTOS NECESSÁRIAS*"
+    )
+
     return "\n\n".join(blocos)
 
 def verificar_duplicidade(chamados):
