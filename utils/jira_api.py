@@ -190,7 +190,7 @@ class JiraAPI:
                 "ativo": f.get("customfield_14825", {}).get("value", "--"),
                 "problema": f.get("customfield_12374", "--"),
                 "endereco": f.get("customfield_12271", "--"),
-                "estado": f.get("customfield_11948", {}).get("value", "--"),
+                "estado": (f.get("customfield_11948") or {}).get("value", "--"),
                 "cep": f.get("customfield_11993", "--"),
                 "cidade": f.get("customfield_11994", "--"),
                 "data_agendada": f.get("customfield_12036"),
