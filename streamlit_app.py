@@ -1,7 +1,7 @@
 import streamlit as st; st.set_page_config(page_title="🤖 Agenda Field Service", page_icon="🤖", layout="wide")
 import pandas as pd
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 try:
     from utils import jira_api as jira  # type: ignore
@@ -15,6 +15,7 @@ DEFAULT_STATUS = getattr(jira, "DEFAULT_STATUS", "--")
 
 CAMPOS_JIRA: List[str] = [
     "responsavel",
+    "assignee",
     "status",
     "summary",
     "customfield_14829",
@@ -34,6 +35,21 @@ CAMPOS_JIRA: List[str] = [
 def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
     issues, _ = cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
     return issues
+
+
+def _deduplicar_chamados(*listas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    vistos: Dict[str, Dict[str, Any]] = {}
+    for lista in listas:
+        for issue in lista:
+            chave = issue.get("key")
+            if chave and chave not in vistos:
+                vistos[chave] = issue
+            elif not chave:
+                # Mantém itens sem chave única usando ``id`` ou ``self`` como fallback.
+                marcador = issue.get("id") or issue.get("self")
+                if marcador and marcador not in vistos:
+                    vistos[marcador] = issue
+    return list(vistos.values())
 
 
 def _flatten_por_loja(agrupados: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -73,9 +89,17 @@ def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
+def _obter_responsavel(fields: Dict[str, Any]) -> Optional[Any]:
+    for chave in ("responsavel", "assignee"):
+        responsavel = fields.get(chave)
+        if responsavel:
+            return responsavel
+    return None
+
+
 def _esta_sem_responsavel(issue: Dict[str, Any]) -> bool:
     fields = issue.get("fields", {}) or {}
-    responsavel = fields.get("responsavel")
+    responsavel = _obter_responsavel(fields)
 
     if not responsavel:
         return True
@@ -89,21 +113,35 @@ def _esta_sem_responsavel(issue: Dict[str, Any]) -> bool:
     return False
 
 
-def _exibir_loja(
+def _obter_status_issue(issue: Dict[str, Any]) -> str:
+    fields = issue.get("fields", {}) or {}
+    status_info = fields.get("status")
+    if isinstance(status_info, dict):
+        nome = status_info.get("name")
+    elif isinstance(status_info, str):
+        nome = status_info
+    else:
+        nome = None
+    return (nome or DEFAULT_STATUS).strip()
+
+
+def _exibir_lojas(
     cliente: "jira.JiraAPI",
-    titulo_aba: str,
     issues: List[Dict[str, Any]],
     spare_keys: set[str],
 ) -> None:
     if not issues:
-        st.info(f"Nenhum chamado encontrado para {titulo_aba}.")
+        st.info("Nenhum chamado encontrado com os filtros selecionados.")
         return
 
     agrupados = cliente.agrupar_chamados(issues)
 
     for loja_codigo in sorted(agrupados.keys(), key=str.casefold):
         chamados_loja = agrupados[loja_codigo]
-        loja_nome = chamados_loja[0].get("loja") if chamados_loja else None
+        if not chamados_loja:
+            continue
+
+        loja_nome = chamados_loja[0].get("loja")
         descricao_loja = loja_nome or loja_codigo
         if loja_nome and loja_nome != loja_codigo:
             descricao_loja = f"{loja_codigo} — {loja_nome}"
@@ -111,6 +149,7 @@ def _exibir_loja(
         aguardando_spare = [
             chamado for chamado in chamados_loja if chamado.get("key") in spare_keys
         ]
+
         header = f"{descricao_loja} ({len(chamados_loja)})"
         with st.expander(header, expanded=False):
             if aguardando_spare:
@@ -124,8 +163,8 @@ def _exibir_loja(
             titulo_mensagem = (
                 f"{loja_codigo} — {loja_nome}"
                 if loja_nome and loja_nome != loja_codigo
-                else loja_nome
-            ) or loja_codigo
+                else (loja_nome or loja_codigo)
+            )
             mensagem = gerar_mensagem(titulo_mensagem, chamados_loja)
             st.code(mensagem, language="markdown")
 
@@ -273,6 +312,9 @@ def main() -> None:
     chamados_spare = carregar_chamados(cliente, jql_spare)
 
     spare_keys = {issue.get("key") for issue in chamados_spare if issue.get("key")}
+    todos_abertos = _deduplicar_chamados(
+        chamados_pendentes, chamados_agendados, chamados_teccampo
+    )
 
     tab_loja, tab_tecnico = st.tabs(
         ["Visão por Loja (Despacho)", "Visão por Técnico (Gestão)"]
@@ -280,21 +322,31 @@ def main() -> None:
 
     with tab_loja:
         st.subheader("Despacho por Loja")
-        abas_status = st.tabs(["Pendentes", "Agendados", "Tec-Campo"])
-        for aba, (titulo, dados_status) in zip(
-            abas_status,
-            [
-                ("Pendentes", chamados_pendentes),
-                ("Agendados", chamados_agendados),
-                ("Tec-Campo", chamados_teccampo),
-            ],
-        ):
-            with aba:
-                _exibir_loja(cliente, titulo, dados_status, spare_keys)
+
+        status_disponiveis = jira.get_lista_status(todos_abertos)
+        if status_disponiveis:
+            status_selecionados = st.multiselect(
+                "Filtrar por Status",
+                status_disponiveis,
+                default=status_disponiveis,
+                key="filtro_status_loja",
+            )
+            if status_selecionados:
+                chamados_filtrados = [
+                    issue
+                    for issue in todos_abertos
+                    if _obter_status_issue(issue) in status_selecionados
+                ]
+            else:
+                chamados_filtrados = []
+        else:
+            st.info("Nenhum status encontrado nas consultas carregadas.")
+            chamados_filtrados = todos_abertos
+
+        _exibir_lojas(cliente, chamados_filtrados, spare_keys)
 
     with tab_tecnico:
         st.subheader("Gestão por Técnico")
-        todos_abertos = chamados_pendentes + chamados_agendados + chamados_teccampo
 
         if not todos_abertos:
             st.info("Nenhum chamado aberto nas consultas carregadas.")
