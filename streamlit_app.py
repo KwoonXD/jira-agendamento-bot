@@ -28,10 +28,27 @@ def _parse_date(value: Any) -> date | None:
 DEFAULT_TECNICO = getattr(jira, "DEFAULT_TECNICO", "Sem técnico definido")
 DEFAULT_STATUS = getattr(jira, "DEFAULT_STATUS", "--")
 
+# Campos mínimos necessários para montar as visões do dashboard e realizar updates.
+CAMPOS_JIRA: List[str] = [
+    "responsavel",  # técnico responsável
+    "status",
+    "summary",
+    "customfield_14829",  # PDV
+    "customfield_14825",  # Ativo (lista de opções)
+    "customfield_12374",  # Problema
+    "customfield_12271",  # Endereço
+    "customfield_11948",  # Estado (select)
+    "customfield_11993",  # CEP
+    "customfield_11994",  # Cidade
+    "customfield_12036",  # Data agendada
+    "customfield_14954",  # Loja
+    "created",
+]
+
 
 @st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_api_client"})
 def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
-    issues, _ = cliente.buscar_chamados_enhanced(jql, fields=["*all"])
+    issues, _ = cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
     return issues
 
 
