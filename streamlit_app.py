@@ -25,32 +25,60 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+DEFAULT_TECNICO = getattr(jira, "DEFAULT_TECNICO", "Sem técnico definido")
+DEFAULT_STATUS = getattr(jira, "DEFAULT_STATUS", "--")
+
+
 @st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_api_client"})
 def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
-    return jira.buscar_chamados_brutos(cliente, jql)
+    issues, _ = cliente.buscar_chamados_enhanced(jql, fields=["*all"])
+    return issues
 
 
-@st.cache_data(ttl=600)
-def preparar_dados(chamados_brutos: List[Dict[str, Any]]) -> Dict[str, Any]:
-    agrupados = jira.agrupar_chamados_por_tecnico(chamados_brutos)
-    tecnicos = sorted(jira.get_lista_tecnicos(chamados_brutos))
-    status = sorted(jira.get_lista_status(chamados_brutos))
+@st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_api_client"})
+def preparar_dados(
+    cliente: "jira.JiraAPI", chamados_brutos: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    agrupados = cliente.agrupar_chamados(chamados_brutos)
+    tecnicos = jira.get_lista_tecnicos(chamados_brutos)
+    status = jira.get_lista_status(chamados_brutos)
 
-    df = pd.DataFrame(chamados_brutos)
-    if not df.empty:
-        if "key" not in df.columns:
-            if "issue_key" in df.columns:
-                df["key"] = df["issue_key"]
-            else:
-                df["key"] = [registro.get("key") if isinstance(registro, dict) else None for registro in chamados_brutos]
-        if "data_agendada" in df.columns:
-            df["data_agendada"] = pd.to_datetime(df["data_agendada"], errors="coerce").dt.date
+    linhas: List[Dict[str, Any]] = []
+    for issue in chamados_brutos:
+        fields = issue.get("fields", {}) or {}
+
+        responsavel = fields.get("responsavel")
+        if isinstance(responsavel, dict):
+            tecnico_nome = responsavel.get("displayName") or responsavel.get("name")
+        elif isinstance(responsavel, str):
+            tecnico_nome = responsavel
         else:
-            df["data_agendada"] = None
-        if "created" in df.columns:
-            df["created"] = pd.to_datetime(df["created"], errors="coerce")
-        if "tecnico" not in df.columns:
-            df["tecnico"] = df.get("responsavel")
+            tecnico_nome = None
+        tecnico_nome = tecnico_nome or DEFAULT_TECNICO
+
+        status_info = fields.get("status")
+        if isinstance(status_info, dict):
+            status_nome = status_info.get("name")
+        elif isinstance(status_info, str):
+            status_nome = status_info
+        else:
+            status_nome = None
+        status_nome = status_nome or DEFAULT_STATUS
+
+        linhas.append(
+            {
+                "key": issue.get("key"),
+                "status": status_nome,
+                "tecnico": tecnico_nome,
+                "data_agendada": fields.get("customfield_12036"),
+                "created": fields.get("created"),
+            }
+        )
+
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        df["data_agendada"] = pd.to_datetime(df["data_agendada"], errors="coerce").dt.date
+        df["created"] = pd.to_datetime(df["created"], errors="coerce")
     else:
         df = pd.DataFrame(columns=["key", "status", "tecnico", "data_agendada", "created"])
 
@@ -176,7 +204,7 @@ def main() -> None:
         st.experimental_rerun()
 
     chamados_brutos = carregar_chamados(cliente, jql_query)
-    dados = preparar_dados(chamados_brutos)
+    dados = preparar_dados(cliente, chamados_brutos)
 
     status_opcoes = dados["status"]
     tecnico_opcoes = ["Todos"] + dados["tecnicos"]

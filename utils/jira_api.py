@@ -8,6 +8,10 @@ from collections import defaultdict
 from typing import Tuple, Dict, Any, Optional, List
 
 
+DEFAULT_TECNICO = "Sem técnico definido"
+DEFAULT_STATUS = "--"
+
+
 class JiraAPI:
     """
     Suporta dois modos:
@@ -181,22 +185,76 @@ class JiraAPI:
 
     # ---------- transições / leitura ----------
     def agrupar_chamados(self, issues: list) -> dict:
-        agrup = defaultdict(list)
+        """Agrupa os chamados por técnico responsável."""
+
+        agrup: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
         for issue in issues:
-            f = issue.get("fields", {})
-            loja = f.get("customfield_14954", {}).get("value", "Loja Desconhecida")
-            agrup[loja].append({
-                "key": issue.get("key"),
-                "pdv": f.get("customfield_14829", "--"),
-                "ativo": f.get("customfield_14825", {}).get("value", "--"),
-                "problema": f.get("customfield_12374", "--"),
-                "endereco": f.get("customfield_12271", "--"),
-                "estado": (f.get("customfield_11948") or {}).get("value", "--"),
-                "cep": f.get("customfield_11993", "--"),
-                "cidade": f.get("customfield_11994", "--"),
-                "data_agendada": f.get("customfield_12036"),
-            })
-        return agrup
+            fields = issue.get("fields", {}) or {}
+
+            responsavel = fields.get("responsavel")
+            if isinstance(responsavel, dict):
+                tecnico = responsavel.get("displayName") or responsavel.get("name")
+            elif isinstance(responsavel, str):
+                tecnico = responsavel
+            else:
+                tecnico = None
+            tecnico = tecnico or DEFAULT_TECNICO
+
+            status_info = fields.get("status")
+            if isinstance(status_info, dict):
+                status_nome = status_info.get("name")
+            elif isinstance(status_info, str):
+                status_nome = status_info
+            else:
+                status_nome = None
+            status_nome = status_nome or DEFAULT_STATUS
+
+            agrup[tecnico].append(
+                {
+                    "key": issue.get("key"),
+                    "status": status_nome,
+                    "tecnico": tecnico,
+                    "resumo": fields.get("summary", "--"),
+                    "pdv": fields.get("customfield_14829", "--"),
+                    "ativo": (fields.get("customfield_14825") or {}).get("value", "--"),
+                    "problema": fields.get("customfield_12374", "--"),
+                    "endereco": fields.get("customfield_12271", "--"),
+                    "estado": (fields.get("customfield_11948") or {}).get("value", "--"),
+                    "cep": fields.get("customfield_11993", "--"),
+                    "cidade": fields.get("customfield_11994", "--"),
+                    "data_agendada": fields.get("customfield_12036"),
+                    "created": fields.get("created"),
+                    "loja": (fields.get("customfield_14954") or {}).get("value", "Loja Desconhecida"),
+                }
+            )
+
+        return dict(agrup)
+
+    def atualizar_campo_issue(self, issue_key: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+        """Atualiza campos de uma issue no Jira."""
+
+        url = f"{self._base()}/issue/{issue_key}"
+        payload = {"fields": fields}
+
+        try:
+            resp = self._req("PUT", url, json_body=payload)
+        except requests.RequestException as exc:  # pragma: no cover - propagação
+            raise RuntimeError(f"Erro ao atualizar issue {issue_key}: {exc}") from exc
+
+        if resp.status_code not in {200, 204}:
+            conteudo = _safe_json(resp)
+            raise RuntimeError(
+                f"Falha ao atualizar issue {issue_key}: {resp.status_code} - {conteudo}"
+            )
+
+        if resp.content:
+            try:
+                return resp.json()
+            except ValueError:  # pragma: no cover - resposta sem JSON
+                return {"raw": resp.text}
+
+        return {}
 
     def get_transitions(self, issue_key: str) -> list:
         url = f"{self._base()}/issue/{issue_key}/transitions"
@@ -266,3 +324,74 @@ def conectar_jira() -> "JiraAPI":
         use_ex_api=use_ex_api,
         cloud_id=cloud_id,
     )
+
+
+def get_lista_tecnicos(chamados_brutos: List[dict]) -> List[str]:
+    """Retorna a lista de técnicos presentes nos chamados."""
+
+    tecnicos: set[str] = set()
+    possui_sem_tecnico = False
+
+    for issue in chamados_brutos:
+        fields = issue.get("fields", {}) or {}
+        responsavel = fields.get("responsavel")
+
+        if isinstance(responsavel, dict):
+            nome = responsavel.get("displayName") or responsavel.get("name")
+        elif isinstance(responsavel, str):
+            nome = responsavel
+        else:
+            nome = None
+
+        if nome:
+            tecnicos.add(nome)
+        else:
+            possui_sem_tecnico = True
+
+    if possui_sem_tecnico:
+        tecnicos.add(DEFAULT_TECNICO)
+
+    return sorted(tecnicos)
+
+
+def get_lista_status(chamados_brutos: List[dict]) -> List[str]:
+    """Retorna a lista de status presentes nos chamados."""
+
+    status: set[str] = set()
+    possui_sem_status = False
+
+    for issue in chamados_brutos:
+        fields = issue.get("fields", {}) or {}
+        status_info = fields.get("status")
+
+        if isinstance(status_info, dict):
+            nome = status_info.get("name")
+        elif isinstance(status_info, str):
+            nome = status_info
+        else:
+            nome = None
+
+        if nome:
+            status.add(nome)
+        else:
+            possui_sem_status = True
+
+    if possui_sem_status:
+        status.add(DEFAULT_STATUS)
+
+    return sorted(status)
+
+
+def atualizar_agendamento(cliente: "JiraAPI", issue_key: str, nova_data: str) -> Dict[str, Any]:
+    """Atualiza o campo de agendamento (`customfield_12036`) de uma issue."""
+
+    if not isinstance(cliente, JiraAPI):
+        raise TypeError("cliente deve ser uma instância de JiraAPI")
+
+    if not issue_key:
+        raise ValueError("issue_key é obrigatório")
+
+    if not nova_data:
+        raise ValueError("nova_data é obrigatória")
+
+    return cliente.atualizar_campo_issue(issue_key, {"customfield_12036": str(nova_data)})
