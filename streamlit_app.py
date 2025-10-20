@@ -181,7 +181,7 @@ def exibir_por_tecnico(agrupados: Dict[str, List[Dict[str, Any]]], df_filtrado: 
                             status_box.update(label="Chamado agendado com sucesso!", state="complete", expanded=False)
                             st.toast(f"Chamado {issue_key} agendado!", icon="✅")
                             st.cache_data.clear()
-                            st.experimental_rerun()
+                            st.rerun()
                         except Exception as erro:  # pragma: no cover
                             status_box.update(label=f"Erro ao agendar: {erro}", state="error")
 
@@ -201,7 +201,7 @@ def main() -> None:
     if st.sidebar.button("Limpar Cache e Recarregar"):
         st.cache_data.clear()
         st.cache_resource.clear()
-        st.experimental_rerun()
+        st.rerun()
 
     chamados_brutos = carregar_chamados(cliente, jql_query)
     dados = preparar_dados(cliente, chamados_brutos)
