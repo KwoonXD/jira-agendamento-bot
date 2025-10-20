@@ -185,7 +185,60 @@ class JiraAPI:
 
     # ---------- transições / leitura ----------
     def agrupar_chamados(self, issues: list) -> dict:
-        """Agrupa os chamados por loja (customfield_14954)."""
+        """Agrupa os chamados por loja (``customfield_14954``) usando o código da loja."""
+
+        def _extrair_codigo_e_nome_loja(valor: Any) -> Tuple[str, str]:
+            codigo: Optional[str] = None
+            nome: Optional[str] = None
+
+            def _processar(dado: Any) -> None:
+                nonlocal codigo, nome
+
+                if isinstance(dado, dict):
+                    possivel_codigo = (
+                        dado.get("value")
+                        or dado.get("code")
+                        or dado.get("key")
+                        or dado.get("id")
+                    )
+                    possivel_nome = (
+                        dado.get("label")
+                        or dado.get("name")
+                        or dado.get("displayName")
+                    )
+
+                    if possivel_codigo and not codigo:
+                        codigo = str(possivel_codigo).strip()
+                    if possivel_nome and not nome:
+                        nome = str(possivel_nome).strip()
+
+                    for nested_key in ("child", "children", "parent"):
+                        nested_value = dado.get(nested_key)
+                        if nested_value is not None:
+                            _processar(nested_value)
+
+                elif isinstance(dado, list):
+                    for item in dado:
+                        _processar(item)
+
+                elif isinstance(dado, str):
+                    texto = dado.strip()
+                    if texto:
+                        if not codigo:
+                            codigo = texto
+                        elif not nome and texto != codigo:
+                            nome = texto
+
+            _processar(valor)
+
+            if not codigo and nome:
+                codigo = nome
+            if not nome and codigo:
+                nome = codigo
+
+            codigo_padrao = codigo or "Loja Desconhecida"
+            nome_padrao = nome or codigo_padrao
+            return codigo_padrao, nome_padrao
 
         agrup: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
@@ -215,18 +268,9 @@ class JiraAPI:
                 status_nome = None
             status_nome = status_nome or DEFAULT_STATUS
 
-            loja_info = fields.get("customfield_14954")
-            if isinstance(loja_info, dict):
-                loja = (
-                    loja_info.get("value")
-                    or loja_info.get("label")
-                    or loja_info.get("name")
-                )
-            elif isinstance(loja_info, str):
-                loja = loja_info
-            else:
-                loja = None
-            loja = loja or "Loja Desconhecida"
+            loja_codigo, loja_nome = _extrair_codigo_e_nome_loja(
+                fields.get("customfield_14954")
+            )
 
             ativo_info = fields.get("customfield_14825")
             if isinstance(ativo_info, dict):
@@ -247,7 +291,7 @@ class JiraAPI:
                 estado = estado_info
             estado = estado or "--"
 
-            agrup[loja].append(
+            agrup[loja_codigo].append(
                 {
                     "key": issue.get("key"),
                     "status": status_nome,
@@ -263,7 +307,8 @@ class JiraAPI:
                     "cidade": fields.get("customfield_11994", "--"),
                     "data_agendada": fields.get("customfield_12036"),
                     "created": fields.get("created"),
-                    "loja": loja,
+                    "loja": loja_nome,
+                    "loja_codigo": loja_codigo,
                 }
             )
 
@@ -365,35 +410,75 @@ def conectar_jira() -> "JiraAPI":
 
 
 def get_lista_tecnicos(chamados_brutos: List[dict]) -> Dict[str, Optional[str]]:
-    """Retorna um dicionário nome → accountId dos técnicos encontrados."""
+    """Retorna um dicionário nome → accountId dos técnicos cadastrados internamente."""
 
     mapa: Dict[str, Optional[str]] = {"Ninguém": None}
 
-    for issue in chamados_brutos:
-        fields = issue.get("fields", {}) or {}
-        responsavel = fields.get("responsavel")
+    configurado = st.secrets.get("TECNICOS") or st.secrets.get("TECNICOS_MAP")
 
-        nome: Optional[str] = None
-        account_id: Optional[str] = None
-
-        if isinstance(responsavel, dict):
-            nome = (
-                responsavel.get("displayName")
-                or responsavel.get("name")
-                or responsavel.get("emailAddress")
-                or responsavel.get("accountId")
-            )
-            account_id = responsavel.get("accountId")
-        elif isinstance(responsavel, str):
-            nome = responsavel
-
+    def _registrar(nome: Optional[str], account_id: Optional[str]) -> None:
         if not nome:
-            continue
+            return
+        nome_normalizado = str(nome).strip()
+        if not nome_normalizado:
+            return
+        if nome_normalizado not in mapa:
+            mapa[nome_normalizado] = (
+                str(account_id).strip() if account_id not in (None, "", "None") else None
+            )
 
-        if nome not in mapa:
-            mapa[nome] = account_id
+    if isinstance(configurado, dict):
+        for nome, conteudo in configurado.items():
+            if isinstance(conteudo, dict):
+                account_id = (
+                    conteudo.get("accountId")
+                    or conteudo.get("account_id")
+                    or conteudo.get("id")
+                )
+            else:
+                account_id = conteudo
+            _registrar(nome, account_id)
 
-    # Ordena alfabeticamente mantendo "Ninguém" na primeira posição.
+    elif isinstance(configurado, list):
+        for item in configurado:
+            if isinstance(item, dict):
+                nome = (
+                    item.get("nome")
+                    or item.get("name")
+                    or item.get("displayName")
+                    or item.get("label")
+                )
+                account_id = (
+                    item.get("accountId")
+                    or item.get("account_id")
+                    or item.get("id")
+                )
+                _registrar(nome, account_id)
+            else:
+                _registrar(str(item), None)
+
+    if len(mapa) == 1:
+        # Fallback: tenta extrair dos chamados quando nenhum técnico interno foi configurado.
+        for issue in chamados_brutos:
+            fields = issue.get("fields", {}) or {}
+            responsavel = fields.get("responsavel")
+
+            nome: Optional[str] = None
+            account_id: Optional[str] = None
+
+            if isinstance(responsavel, dict):
+                nome = (
+                    responsavel.get("displayName")
+                    or responsavel.get("name")
+                    or responsavel.get("emailAddress")
+                    or responsavel.get("accountId")
+                )
+                account_id = responsavel.get("accountId")
+            elif isinstance(responsavel, str):
+                nome = responsavel
+
+            _registrar(nome, account_id)
+
     ordenado = {"Ninguém": None}
     for nome in sorted((n for n in mapa.keys() if n != "Ninguém"), key=str.casefold):
         ordenado[nome] = mapa[nome]

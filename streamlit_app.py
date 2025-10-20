@@ -50,6 +50,22 @@ def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
 
     df = df.drop(columns=["tecnico_account_id"], errors="ignore")
 
+    colunas_prioritarias = [
+        "key",
+        "status",
+        "loja_codigo",
+        "loja",
+        "pdv",
+        "ativo",
+        "problema",
+        "data_agendada",
+        "tecnico",
+        "created",
+    ]
+    existentes = [col for col in colunas_prioritarias if col in df.columns]
+    restantes = [col for col in df.columns if col not in existentes]
+    df = df[existentes + restantes]
+
     if "data_agendada" in df.columns:
         df["data_agendada"] = pd.to_datetime(df["data_agendada"], errors="coerce").dt.strftime("%Y-%m-%d")
     if "created" in df.columns:
@@ -85,12 +101,17 @@ def _exibir_loja(
 
     agrupados = cliente.agrupar_chamados(issues)
 
-    for loja in sorted(agrupados.keys(), key=str.casefold):
-        chamados_loja = agrupados[loja]
+    for loja_codigo in sorted(agrupados.keys(), key=str.casefold):
+        chamados_loja = agrupados[loja_codigo]
+        loja_nome = chamados_loja[0].get("loja") if chamados_loja else None
+        descricao_loja = loja_nome or loja_codigo
+        if loja_nome and loja_nome != loja_codigo:
+            descricao_loja = f"{loja_codigo} — {loja_nome}"
+
         aguardando_spare = [
             chamado for chamado in chamados_loja if chamado.get("key") in spare_keys
         ]
-        header = f"{loja} ({len(chamados_loja)})"
+        header = f"{descricao_loja} ({len(chamados_loja)})"
         with st.expander(header, expanded=False):
             if aguardando_spare:
                 lista_keys = ", ".join(
@@ -100,7 +121,12 @@ def _exibir_loja(
                     f"Chamados aguardando Spare: {lista_keys}", icon="⚠️"
                 )
 
-            mensagem = gerar_mensagem(loja, chamados_loja)
+            titulo_mensagem = (
+                f"{loja_codigo} — {loja_nome}"
+                if loja_nome and loja_nome != loja_codigo
+                else loja_nome
+            ) or loja_codigo
+            mensagem = gerar_mensagem(titulo_mensagem, chamados_loja)
             st.code(mensagem, language="markdown")
 
             df_loja = montar_dataframe_chamados(chamados_loja)
@@ -125,11 +151,16 @@ def _renderizar_nao_atribuidos(
 
     for chamado in sorted(normalizados, key=lambda c: c.get("created") or ""):
         chave = chamado.get("key") or "--"
+        loja_nome = chamado.get("loja")
+        loja_codigo = chamado.get("loja_codigo") or loja_nome
+        descricao_loja = loja_codigo or loja_nome or "--"
+        if loja_nome and loja_codigo and loja_nome != loja_codigo:
+            descricao_loja = f"{loja_codigo} — {loja_nome}"
         col_info, col_select, col_botao = st.columns([4, 3, 1])
 
         col_info.markdown(
             f"**{chave}** — {chamado.get('resumo', '--')}  \n"
-            f"Loja: {chamado.get('loja', '--')}  \n"
+            f"Loja: {descricao_loja}  \n"
             f"Status: {chamado.get('status', DEFAULT_STATUS)}"
         )
 
