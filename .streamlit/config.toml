@@ -1,6 +1,19 @@
 [theme]
-primaryColor = "#76D7C4"
-backgroundColor = "#F0FDF4"
-secondaryBackgroundColor = "#D4EFDF"
-textColor = "#102A43"
+base = "dark"
+primaryColor = "#24F2B6"          # verde menta brilhante
+backgroundColor = "#030706"        # quase preto
+secondaryBackgroundColor = "#0D1F1A"  # verde escuro para painéis
+textColor = "#E6FFF5"             # texto claro com tom esverdeado
 font = "sans serif"
+
+[client]
+toolbarMode = "auto"
+
+[server]
+headless = true
+enableXsrfProtection = true
+enableCORS = false
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false

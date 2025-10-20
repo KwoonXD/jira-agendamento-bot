@@ -1,6 +1,7 @@
 # utils/jira_api.py
 import base64
 import json
+import streamlit as st
 import requests
 from requests.auth import HTTPBasicAuth
 from collections import defaultdict
@@ -231,3 +232,37 @@ def _safe_json(r: requests.Response):
         return r.json()
     except Exception:
         return r.text
+
+
+@st.cache_resource(show_spinner=False)
+def conectar_jira() -> "JiraAPI":
+    """Retorna uma instância compartilhada de :class:`JiraAPI` usando ``st.secrets``."""
+
+    def _buscar_chave(chaves: List[str]) -> Optional[str]:
+        for chave in chaves:
+            if isinstance(config, dict) and chave in config and config[chave]:
+                return str(config[chave])
+            if chave in st.secrets and st.secrets[chave]:
+                return str(st.secrets[chave])
+        return None
+
+    config = st.secrets.get("JIRA", {})
+
+    email = _buscar_chave(["email", "EMAIL", "jira_email", "JIRA_EMAIL"])
+    token = _buscar_chave(["token", "TOKEN", "api_token", "API_TOKEN"])
+    url = _buscar_chave(["url", "URL", "jira_url", "JIRA_URL"])
+    use_ex_api_raw = _buscar_chave(["use_ex_api", "USE_EX_API"])
+    cloud_id = _buscar_chave(["cloud_id", "CLOUD_ID"])
+
+    if not email or not token or not url:
+        raise RuntimeError("Credenciais do Jira ausentes em st.secrets (email/token/url)")
+
+    use_ex_api = str(use_ex_api_raw).lower() in {"1", "true", "yes", "on"} if use_ex_api_raw is not None else False
+
+    return JiraAPI(
+        email=email,
+        api_token=token,
+        jira_url=url,
+        use_ex_api=use_ex_api,
+        cloud_id=cloud_id,
+    )

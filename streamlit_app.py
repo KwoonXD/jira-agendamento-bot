@@ -25,9 +25,8 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
-@st.cache_data(ttl=600)
-def carregar_chamados(jql: str) -> List[Dict[str, Any]]:
-    cliente = jira.conectar_jira()
+@st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_api_client"})
+def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
     return jira.buscar_chamados_brutos(cliente, jql)
 
 
@@ -115,7 +114,7 @@ def exibir_visao_geral(df_filtrado: pd.DataFrame):
         st.info("Sem dados para exibir o gráfico por técnico.")
 
 
-def exibir_por_tecnico(agrupados: Dict[str, List[Dict[str, Any]]], df_filtrado: pd.DataFrame):
+def exibir_por_tecnico(agrupados: Dict[str, List[Dict[str, Any]]], df_filtrado: pd.DataFrame, cliente: "jira.JiraAPI"):
     if df_filtrado.empty:
         st.info("Nenhum chamado encontrado com os filtros atuais.")
         return
@@ -150,7 +149,6 @@ def exibir_por_tecnico(agrupados: Dict[str, List[Dict[str, Any]]], df_filtrado: 
                 if col_botao.button("Salvar", key=f"salvar_{tecnico}_{issue_key}"):
                     with st.status("Agendando chamado...", expanded=True) as status_box:
                         try:
-                            cliente = jira.conectar_jira()
                             jira.atualizar_agendamento(cliente, issue_key, nova_data.isoformat())
                             status_box.update(label="Chamado agendado com sucesso!", state="complete", expanded=False)
                             st.toast(f"Chamado {issue_key} agendado!", icon="✅")
@@ -167,14 +165,17 @@ def exibir_todos(df_filtrado: pd.DataFrame):
 def main() -> None:
     st.sidebar.title("Filtros")
 
+    cliente = jira.conectar_jira()
+
     jql_default = st.secrets.get("JQL_CHAMADOS", "project = FSA ORDER BY updated DESC")
     jql_query = st.sidebar.text_area("JQL", jql_default, height=100)
 
     if st.sidebar.button("Limpar Cache e Recarregar"):
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.experimental_rerun()
 
-    chamados_brutos = carregar_chamados(jql_query)
+    chamados_brutos = carregar_chamados(cliente, jql_query)
     dados = preparar_dados(chamados_brutos)
 
     status_opcoes = dados["status"]
@@ -210,7 +211,7 @@ def main() -> None:
         exibir_visao_geral(df_filtrado)
 
     with aba_tecnicos:
-        exibir_por_tecnico(dados["agrupados"], df_filtrado)
+        exibir_por_tecnico(dados["agrupados"], df_filtrado, cliente)
 
     with aba_todos:
         exibir_todos(df_filtrado)
