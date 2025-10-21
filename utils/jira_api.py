@@ -121,9 +121,9 @@ class JiraAPI:
         """Executa o endpoint de busca do Jira com suporte a paginação."""
 
         base_url = self._base()
-        # O endpoint /search/jql não é para busca, apenas para validação de JQL.
-        # Manter exclusivamente /search evita payloads incompatíveis.
-        candidatos = [f"{base_url}/search"]
+        candidatos = [f"{base_url}/search", f"{base_url}/search/jql"]
+        if self.use_ex_api:
+            candidatos.reverse()
         if isinstance(fields, str):
             fields_list = [f.strip() for f in fields.split(",") if f.strip()]
         else:
@@ -163,7 +163,10 @@ class JiraAPI:
             usa_nextpage = url.endswith("/search/jql")
             payload_modes: List[str] = ["jql_key"]
             if usa_nextpage:
-                payload_modes = ["query_obj_type_v1", "query_str", "query_obj", "jql_key"]
+                # A API experimental (/search/jql) espera um payload com a chave "query"
+                # contendo a string JQL, que corresponde ao modo "query_str".
+                # Os outros modos (como jql_key) causam HTTP 400.
+                payload_modes = ["query_str"]
 
             ultimo_meta: Dict[str, Any] = {}
 
