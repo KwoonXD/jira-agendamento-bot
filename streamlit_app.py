@@ -1,664 +1,978 @@
-# streamlit_app.py
-# ----------------------------------------------------
-# Painel Field Service – versão compatível com sua base já funcional
-# Mantém: JiraAPI.buscar_chamados_enhanced, whoami, debug sidebar, expandidos por loja,
-# heatmap gratuito via Nominatim, filtros e KPIs, e transições (inclui TEC-CAMPO).
-
-import io
-import csv
-import os
-import time
-import requests
-from datetime import datetime, timedelta, timezone
-from collections import defaultdict
-
+import streamlit as st; st.set_page_config(page_title="🤖 Agenda Field Service", page_icon="🤖", layout="wide")
 import pandas as pd
-import streamlit as st
-
-# ==== Config da página ====
-st.set_page_config(
-    page_title="Painel Field Service",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ==== Auto‐refresh com fallback ====
-if "auto_refresh_on" not in st.session_state:
-    st.session_state.auto_refresh_on = True
+from datetime import datetime, time
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import re
 
 try:
-    from streamlit_autorefresh import st_autorefresh
-    if st.session_state.auto_refresh_on:
-        st_autorefresh(interval=90_000, key="auto_refresh_90s")
-except Exception:
-    # Fallback por meta refresh (caso o componente não esteja disponível no deploy)
-    if st.session_state.auto_refresh_on:
-        st.markdown('<meta http-equiv="refresh" content="90">', unsafe_allow_html=True)
-        st.caption("⏱️ Auto-refresh por fallback (meta refresh).")
+    import pyperclip
+except Exception:  # pragma: no cover - fallback em ambientes sem clipboard
+    pyperclip = None
 
-# ==== Estado básico ====
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "filters" not in st.session_state:
-    st.session_state.filters = {
-        "threshold": 2,
-        "uf": "",
-        "q": "",
-        "days": 14,
-        "statuses": ["AGENDAMENTO", "Agendado", "TEC-CAMPO"],
-    }
-if "presets" not in st.session_state:
-    st.session_state.presets = {}
+try:
+    from streamlit_calendar import calendar
+except Exception as exc:  # pragma: no cover - feedback em runtime
+    calendar = None  # type: ignore
 
-# ==== Imports da sua base util ====
-from utils.jira_api import JiraAPI
-from utils.messages import gerar_mensagem, verificar_duplicidade
-
-# ==== Credenciais (secrets) ====
-EMAIL = st.secrets.get("EMAIL", "")
-API_TOKEN = st.secrets.get("API_TOKEN", "")
-CLOUD_ID = st.secrets.get("CLOUD_ID")
-USE_EX_API = str(st.secrets.get("USE_EX_API", "true")).lower() == "true"
-
-if not EMAIL or not API_TOKEN:
-    st.error("⚠️ Configure `EMAIL` e `API_TOKEN` em `.streamlit/secrets.toml`.")
-    st.stop()
-if USE_EX_API and not CLOUD_ID:
-    st.error("⚠️ `USE_EX_API=true`, mas faltou `CLOUD_ID` em secrets.")
-    st.stop()
-
-jira = JiraAPI(
-    EMAIL,
-    API_TOKEN,
-    "https://delfia.atlassian.net",
-    use_ex_api=USE_EX_API,
-    cloud_id=CLOUD_ID,
+from utils import jira_api as jira
+from utils.messages import (
+    TEMPLATES_DISPONIVEIS,
+    gerar_mensagem,
+    verificar_duplicidade,
 )
 
-# ==== Autenticação rápida ====
-who, dbg_who = jira.whoami()
-if not who:
-    st.error(
-        "❌ Falha de autenticação no Jira.\n\n"
-        f"- URL: `{dbg_who.get('url')}`\n"
-        f"- Status: `{dbg_who.get('status')}`\n"
-        f"- Erro: `{dbg_who.get('error')}`"
-    )
-    st.stop()
+CAMPOS_JIRA: List[str] = [
+    "status",
+    "summary",
+    "description",
+    "created",
+    "customfield_14829",  # PDV
+    "customfield_14825",  # Ativo
+    "customfield_12374",  # Problema
+    "customfield_12271",  # Endereço
+    "customfield_11948",  # Estado
+    "customfield_11993",  # CEP
+    "customfield_11994",  # Cidade
+    "customfield_12036",  # Data agendada
+    "customfield_14954",  # Loja
+    "changelog",
+]
 
-# ==== Campos a buscar ====
-FIELDS = (
-    "summary,customfield_14954,customfield_14829,customfield_14825,"
-    "customfield_12374,customfield_12271,customfield_11993,"
-    "customfield_11994,customfield_11948,customfield_12036,customfield_12279,"
-    "status,created,resolutiondate,updated"
-)
+STATUS_DESTINO_TEC_CAMPO = "TEC-CAMPO"
 
-# ==== JQLs (mantidos) ====
-JQL_PEND = 'project = FSA AND status = "AGENDAMENTO" ORDER BY updated DESC'
-JQL_AG   = 'project = FSA AND status = "Agendado" ORDER BY updated DESC'
-JQL_TC   = 'project = FSA AND status = "TEC-CAMPO" ORDER BY updated DESC'
+TEC_LIST_KEY = "tecnicos_df"
 
-# IDs confirmados para visão combinada (não mude se já conferiu)
-STATUS_ID_AGENDAMENTO = 11499
-STATUS_ID_AGENDADO    = 11481
-STATUS_ID_TEC_CAMPO   = 11500
-JQL_COMBINADA = (
-    f"project = FSA AND status in ({STATUS_ID_AGENDAMENTO},{STATUS_ID_AGENDADO},{STATUS_ID_TEC_CAMPO})"
-)
 
-# Resolvidos para o gráfico
-JQL_RESOLVIDOS_BASE = (
-    'project = FSA AND status in (11498, 10702, "Encerrado", "Resolvido") '
-    'AND resolutiondate >= "{from_iso}" AND resolutiondate <= "{to_iso}"'
-)
+@st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_client"})
+def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
+    issues, _ = cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
+    return issues
 
-# ==== Helpers de parsing ====
-def parse_dt(dt_str: str):
-    if not dt_str:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            return datetime.strptime(dt_str, fmt).astimezone(timezone.utc)
-        except Exception:
-            pass
-    return None
 
-def loja_from_issue(issue):
-    f = issue.get("fields", {}) or {}
-    return (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
+def _deduplicar_chamados(*listas: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    vistos: Dict[str, Dict[str, Any]] = {}
+    for lista in listas:
+        for issue in lista:
+            chave = issue.get("key") or issue.get("id") or issue.get("self")
+            if chave and chave not in vistos:
+                vistos[chave] = issue
+    return list(vistos.values())
 
-def cidade_from_issue(issue):
-    return (issue.get("fields", {}) or {}).get("customfield_11994") or ""
 
-def uf_from_issue(issue):
-    return ((issue.get("fields", {}) or {}).get("customfield_11948") or {}).get("value") or ""
+def _filtrar_por_busca(chamados: List[Dict[str, Any]], termo: str) -> List[Dict[str, Any]]:
+    if not termo:
+        return chamados
 
-def cep_from_issue(issue):
-    return (issue.get("fields", {}) or {}).get("customfield_11993") or ""
+    termo_norm = termo.strip().lower()
+    if not termo_norm:
+        return chamados
 
-def endereco_from_issue(issue):
-    return (issue.get("fields", {}) or {}).get("customfield_12271") or ""
-
-def updated_from_issue(issue):
-    return parse_dt((issue.get("fields", {}) or {}).get("updated"))
-
-def created_from_issue(issue):
-    return parse_dt((issue.get("fields", {}) or {}).get("created"))
-
-def resolutiondate_from_issue(issue):
-    return parse_dt((issue.get("fields", {}) or {}).get("resolutiondate"))
-
-def is_loja_critica(loja_data):
-    qtd = loja_data.get("qtd", 0)
-    last_upd = loja_data.get("last_updated")
-    stale = False
-    if last_upd:
-        stale = (datetime.now(timezone.utc) - last_upd) > timedelta(days=7)
-    return (qtd >= 5) or stale
-
-# ==== Buscas (mantidas com seu Enhanced) ====
-pendentes_raw, dbg_pend = jira.buscar_chamados_enhanced(JQL_PEND, FIELDS, page_size=200)
-agendados_raw, dbg_ag   = jira.buscar_chamados_enhanced(JQL_AG,   FIELDS, page_size=200)
-tec_raw,      dbg_tc    = jira.buscar_chamados_enhanced(JQL_TC,   FIELDS, page_size=300)
-combo_raw,    dbg_combo = jira.buscar_chamados_enhanced(JQL_COMBINADA, FIELDS, page_size=600)
-
-# Janela para tendência
-days_window = int(st.session_state.filters["days"])
-to_dt = datetime.now(timezone.utc)
-from_dt = to_dt - timedelta(days=days_window)
-jql_res = JQL_RESOLVIDOS_BASE.format(
-    from_iso=from_dt.strftime("%Y-%m-%d %H:%M"),
-    to_iso=to_dt.strftime("%Y-%m-%d %H:%M")
-)
-resolvidos_raw, dbg_res = jira.buscar_chamados_enhanced(jql_res, FIELDS, page_size=600)
-
-# ==== Agrupamentos ====
-agrup_pend = jira.agrupar_chamados(pendentes_raw)
-
-grouped_sched = defaultdict(lambda: defaultdict(list))
-if agendados_raw:
-    for issue in agendados_raw:
-        f = issue.get("fields", {}) or {}
-        loja = (f.get("customfield_14954") or {}).get("value") or "Loja Desconhecida"
-        raw_dt = f.get("customfield_12036")
-        data_str = "Não definida"
-        if raw_dt:
-            try:
-                data_str = datetime.strptime(raw_dt, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
-            except Exception:
-                data_str = str(raw_dt)
-        grouped_sched[data_str][loja].append(issue)
-
-agrup_tec = jira.agrupar_chamados(tec_raw)
-
-raw_by_loja = defaultdict(list)
-for i in (pendentes_raw or []) + (agendados_raw or []) + (tec_raw or []):
-    raw_by_loja[loja_from_issue(i)].append(i)
-
-# ==== Construções de visão geral / destaques ====
-kpi = {"AGENDAMENTO": 0, "Agendado": 0, "TEC-CAMPO": 0}
-for issue in combo_raw or []:
-    fields = issue.get("fields") or {}
-    status_name = (fields.get("status") or {}).get("name")
-    if status_name in kpi:
-        kpi[status_name] += 1
-
-contagem_por_loja = {}
-for issue in combo_raw or []:
-    loja = loja_from_issue(issue)
-    cidade = cidade_from_issue(issue)
-    uf = uf_from_issue(issue)
-    upd = updated_from_issue(issue)
-    if loja not in contagem_por_loja:
-        contagem_por_loja[loja] = {
-            "cidade": cidade, "uf": uf, "qtd": 0, "last_updated": upd,
-            "endereco": endereco_from_issue(issue), "cep": cep_from_issue(issue)
-        }
-    contagem_por_loja[loja]["qtd"] += 1
-    if cidade and not contagem_por_loja[loja]["cidade"]:
-        contagem_por_loja[loja]["cidade"] = cidade
-    if uf and not contagem_por_loja[loja]["uf"]:
-        contagem_por_loja[loja]["uf"] = uf
-    if upd and (contagem_por_loja[loja]["last_updated"] is None or upd > contagem_por_loja[loja]["last_updated"]):
-        contagem_por_loja[loja]["last_updated"] = upd
-    if not contagem_por_loja[loja]["endereco"] and endereco_from_issue(issue):
-        contagem_por_loja[loja]["endereco"] = endereco_from_issue(issue)
-    if not contagem_por_loja[loja]["cep"] and cep_from_issue(issue):
-        contagem_por_loja[loja]["cep"] = cep_from_issue(issue)
-
-top_list = sorted(
-    [
-        {
-            "loja": loja,
-            "cidade": data["cidade"],
-            "uf": data["uf"],
-            "qtd": data["qtd"],
-            "last_updated": data["last_updated"],
-            "critica": is_loja_critica(data),
-        }
-        for loja, data in contagem_por_loja.items()
-    ],
-    key=lambda x: (-x["qtd"], x["loja"])
-)[:5]
-
-# ==== Sidebar – Ações + Debug ====
-with st.sidebar:
-    st.header("Ações")
-    if st.button("↩️ Desfazer última ação"):
-        if st.session_state.history:
-            action = st.session_state.history.pop()
-            reverted = 0
-            for key in action["keys"]:
-                trans = jira.get_transitions(key)
-                rev_id = next((t["id"] for t in trans if (t.get("to", {}) or {}).get("name") == action["from"]), None)
-                if rev_id and jira.transicionar_status(key, rev_id).status_code == 204:
-                    reverted += 1
-            st.success(f"Revertido: {reverted} FSAs → {action['from']}")
-        else:
-            st.info("Nenhuma ação para desfazer.")
-
-    st.markdown("---")
-    st.header("Transição de Chamados")
-
-    lojas_pend = set(agrup_pend.keys())
-    lojas_ag = set()
-    if grouped_sched:
-        for _, stores in grouped_sched.items():
-            lojas_ag |= set(stores.keys())
-    lojas_tc = set(agrup_tec.keys())
-    lojas_cat = ["—"] + sorted(lojas_pend | lojas_ag | lojas_tc)
-
-    loja_sel = st.selectbox("Selecione a loja:", lojas_cat, help="Usado nas ações em massa abaixo.")
-
-    with st.expander("🛠️ Debug (Enhanced Search)"):
-        st.json({
-            "use_ex_api": USE_EX_API, "cloud_id": CLOUD_ID,
-            "pendentes": {"count": len(pendentes_raw or []), **dbg_pend},
-            "agendados": {"count": len(agendados_raw or []), **dbg_ag},
-            "tec_campo": {"count": len(tec_raw or []), **dbg_tc},
-            "combo": {"count": len(combo_raw or []), **dbg_combo},
-            "resolvidos": {"count": len(resolvidos_raw or []), **dbg_res},
-            "last_call": {
-                "url": getattr(jira, "last_url", None),
-                "method": getattr(jira, "last_method", None),
-                "status": getattr(jira, "last_status", None),
-                "count": getattr(jira, "last_count", None),
-                "params": getattr(jira, "last_params", None),
-                "error": getattr(jira, "last_error", None),
-            }
-        })
-
-    if loja_sel != "—":
-        st.markdown("### 🚚 Fluxo rápido")
-        em_campo = st.checkbox("Técnico em campo? (agendar + mover tudo → Tec-Campo)")
-
-        if em_campo:
-            st.caption("Preencha os dados do agendamento:")
-            data = st.date_input("Data")
-            hora = st.time_input("Hora")
-            tecnico = st.text_input("Técnicos (Nome-CPF-RG-TEL)")
-
-            dt_iso = datetime.combine(data, hora).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
-            extra_ag = {"customfield_12036": dt_iso}
-            if tecnico:
-                extra_ag["customfield_12279"] = {
-                    "type": "doc", "version": 1,
-                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": tecnico}]}],
-                }
-
-            keys_pend  = [i["key"] for i in (pendentes_raw or []) if loja_from_issue(i) == loja_sel]
-            keys_sched = [i["key"] for i in (agendados_raw or [])  if loja_from_issue(i) == loja_sel]
-            all_keys = keys_pend + keys_sched
-
-            if st.button(f"Agendar e mover {len(all_keys)} FSAs → Tec-Campo"):
-                errors, moved = [], 0
-
-                # 1) Agendar pendentes
-                for k in keys_pend:
-                    trans = jira.get_transitions(k)
-                    agid = next((t["id"] for t in trans if "agend" in t["name"].lower()), None)
-                    if agid:
-                        r = jira.transicionar_status(k, agid, fields=extra_ag)
-                        if r.status_code != 204:
-                            errors.append(f"{k}⏳{r.status_code}")
-
-                # 2) Mover todos para Tec-Campo
-                for k in all_keys:
-                    trans = jira.get_transitions(k)
-                    tcid = next((t["id"] for t in trans if "tec-campo" in (t.get("to", {}) or {}).get("name", "").lower()), None)
-                    if tcid:
-                        r = jira.transicionar_status(k, tcid)
-                        if r.status_code == 204:
-                            moved += 1
-                        else:
-                            errors.append(f"{k}➡️{r.status_code}")
-
-                if errors:
-                    st.error("Erros:")
-                    [st.code(e) for e in errors]
-                else:
-                    st.success(f"{len(all_keys)} FSAs agendados e movidos → Tec-Campo")
-                    st.session_state.history.append({"keys": all_keys, "from": "AGENDADO"})
-
-        else:
-            # fluxo manual
-            opts = (
-                [i["key"] for i in (pendentes_raw or []) if loja_from_issue(i) == loja_sel] +
-                [i["key"] for i in (agendados_raw  or []) if loja_from_issue(i) == loja_sel] +
-                [i["key"] for i in (tec_raw       or []) if loja_from_issue(i) == loja_sel]
+    filtrados: List[Dict[str, Any]] = []
+    for issue in chamados:
+        fields = issue.get("fields", {}) or {}
+        loja_valor = fields.get("customfield_14954")
+        loja_texto = ""
+        if isinstance(loja_valor, dict):
+            loja_texto = " ".join(
+                str(loja_valor.get(chave) or "")
+                for chave in ("value", "label", "name", "displayName", "text")
             )
-            sel = st.multiselect("FSAs (pend.+agend.+tec-campo):", sorted(set(opts)))
-            if sel:
-                trans_opts = {t["name"]: t["id"] for t in jira.get_transitions(sel[0])}
-                choice = st.selectbox("Transição:", ["—"] + list(trans_opts))
-                extra = {}
-                if choice and "agend" in choice.lower():
-                    d = st.date_input("Data")
-                    h = st.time_input("Hora")
-                    tec = st.text_input("Técnicos (Nome-CPF-RG-TEL)")
-                    iso = datetime.combine(d, h).strftime("%Y-%m-%dT%H:%M:%S.000-0300")
-                    extra["customfield_12036"] = iso
-                    if tec:
-                        extra["customfield_12279"] = {
-                            "type": "doc", "version": 1,
-                            "content": [{"type": "paragraph", "content": [{"type": "text", "text": tec}]}],
-                        }
-                if st.button("Aplicar"):
-                    if choice in (None, "—") or not sel:
-                        st.warning("Selecione FSAs e transição.")
-                    else:
-                        prev_issue = jira.get_issue(sel[0]) or {}
-                        prev = ((prev_issue.get("fields") or {}).get("status") or {}).get("name", "AGENDADO")
-                        errs, mv = [], 0
-                        for k in sel:
-                            r = jira.transicionar_status(k, trans_opts[choice], fields=extra or None)
-                            if r.status_code == 204:
-                                mv += 1
-                            else:
-                                errs.append(f"{k}:{r.status_code}")
-                        if errs:
-                            st.error("Falhas:")
-                            [st.code(e) for e in errs]
-                        else:
-                            st.success(f"{mv} FSAs movidos → {choice}")
-                            st.session_state.history.append({"keys": sel, "from": prev})
+        elif isinstance(loja_valor, str):
+            loja_texto = loja_valor
 
-# ==== Título ====
-st.title("📱 Painel Field Service")
-
-# ==== Abas ====
-tab_details, tab_overview = st.tabs(["📋 Chamados", "📊 Visão Geral"])
-
-# ============================
-# 📋 Chamados (Detalhes)
-# ============================
-with tab_details:
-    # Destaques colapsáveis (N+)
-    st.subheader("🏷️ Lojas com N+ chamados (AGENDAMENTO • Agendado • TEC-CAMPO)")
-    with st.expander("Abrir/Fechar destaques", expanded=False):
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-        threshold = c1.number_input("Mín. chamados", min_value=2, max_value=50, value=int(st.session_state.filters["threshold"]), step=1)
-        order_opt = c2.selectbox("Ordenar por", ["Chamados ↓", "Loja ↑", "Cidade ↑"])
-        uf_filter = c3.text_input("Filtrar UF", value=st.session_state.filters["uf"])
-        busca_loja = c4.text_input("Buscar loja/cidade", value=st.session_state.filters["q"], placeholder="Digite parte do nome...")
-
-        st.session_state.filters.update({"threshold": int(threshold), "uf": uf_filter, "q": busca_loja})
-
-        destaques = []
-        for loja, data in contagem_por_loja.items():
-            if data["qtd"] >= threshold:
-                row = {
-                    "Loja": loja,
-                    "Cidade": data["cidade"],
-                    "UF": data["uf"],
-                    "Chamados": data["qtd"],
-                    "Últ. atualização": data["last_updated"].astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M") if data["last_updated"] else "—",
-                    "⚠️": "🔴" if is_loja_critica(data) else "",
-                }
-                destaques.append(row)
-
-        destaques = [
-            r for r in destaques
-            if (not uf_filter or (r["UF"] or "").upper() == uf_filter.strip().upper())
-            and (not busca_loja or busca_loja.lower() in (r["Loja"] or "").lower()
-                 or busca_loja.lower() in (r["Cidade"] or "").lower())
+        candidatos = [
+            issue.get("key", ""),
+            fields.get("summary", ""),
+            fields.get("customfield_14829", ""),
+            fields.get("customfield_12374", ""),
+            fields.get("customfield_12036", ""),
+            loja_texto,
         ]
+        if any(termo_norm in str(valor).lower() for valor in candidatos if valor):
+            filtrados.append(issue)
+    return filtrados
 
-        if order_opt == "Chamados ↓":
-            destaques.sort(key=lambda x: (-x["Chamados"], x["Loja"]))
-        elif order_opt == "Loja ↑":
-            destaques.sort(key=lambda x: (x["Loja"], -x["Chamados"]))
+
+def _flatten_agrupado(agrupado: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    chamados: List[Dict[str, Any]] = []
+    for lista in agrupado.values():
+        chamados.extend(lista)
+    return chamados
+
+
+def _obter_limite_sla(chave: str, padrao: int) -> int:
+    try:
+        valor = st.session_state.get(chave, padrao)
+        inteiro = int(valor)
+    except (TypeError, ValueError):
+        return padrao
+    return max(0, inteiro)
+
+
+def _filtrar_selecionados(df_editado: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df_editado, pd.DataFrame) or "Selecionar" not in df_editado.columns:
+        return pd.DataFrame(columns=df_editado.columns if isinstance(df_editado, pd.DataFrame) else [])
+    mascara = df_editado["Selecionar"].fillna(False)
+    return df_editado[mascara.astype(bool)]
+
+
+def _formatar_data_agendada(valor: Any) -> str:
+    if not valor:
+        return "--"
+    serie = pd.to_datetime(pd.Series([valor]), errors="coerce", utc=True)
+    dt = serie.iloc[0]
+    if pd.isna(dt):
+        return "--"
+    return dt.tz_convert("America/Sao_Paulo").strftime("%d/%m/%Y %H:%M") if dt.tzinfo else dt.strftime("%d/%m/%Y %H:%M")
+
+
+def _slugify_chave(valor: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z]+", "_", valor).strip("_")
+    return slug or "sem_identificacao"
+
+
+# ESTA É A FUNÇÃO CORRIGIDA (VERSÃO ORIGINAL)
+def _agrupar_por_data_agendada_raw(
+    chamados: List[Dict[str, Any]]
+) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
+    grupos: Dict[str, Dict[str, Any]] = {}
+    for issue in chamados:
+        fields = issue.get("fields", {}) or {}
+        data = fields.get("customfield_12036")
+        dt = pd.to_datetime(data, errors="coerce", utc=True) # Corrigido para usar utc=True
+        if pd.isna(dt):
+            label = "Sem data definida"
+            ordem = None
         else:
-            destaques.sort(key=lambda x: ((x["Cidade"] or ""), x["Loja"]))
+            dt_local = dt.tz_convert("America/Sao_Paulo")
+            label = dt_local.strftime("%d/%m/%Y")
+            ordem = dt_local.date()
 
-        st.caption(f"{len(destaques)} loja(s) encontradas após filtros.")
-        st.dataframe(destaques, use_container_width=True, hide_index=True)
+        entrada = grupos.setdefault(
+            label,
+            {"issues": [], "ordem": ordem, "slug": _slugify_chave(label)},
+        )
+        entrada["issues"].append(issue)
+        if entrada.get("ordem") is None and ordem is not None:
+            entrada["ordem"] = ordem
 
-        if destaques:
-            output = io.StringIO()
-            writer = csv.DictWriter(output, fieldnames=["Loja", "Cidade", "UF", "Chamados", "Últ. atualização", "⚠️"])
-            writer.writeheader()
-            writer.writerows(destaques)
-            st.download_button(
-                "⬇️ Baixar CSV",
-                data=output.getvalue().encode("utf-8"),
-                file_name=f"lojas_destaque_{threshold}+_{datetime.now():%Y%m%d_%H%M%S}.csv",
-                mime="text/csv"
-            )
-        else:
-            st.info("Nenhuma loja atende aos filtros no momento.")
+    ordenados: List[Tuple[str, str, List[Dict[str, Any]]]] = []
+    for label, payload in sorted(
+        grupos.items(), key=lambda item: (item[1]["ordem"] is None, item[1]["ordem"] or datetime.max.date())
+    ):
+        ordenados.append((label, payload.get("slug", _slugify_chave(label)), payload["issues"]))
+    return ordenados
 
-    st.markdown("")
 
-    # Sub-abas: Pendentes | Agendados | TEC-CAMPO
-    t1, t2, t3 = st.tabs(["⏳ Pendentes de Agendamento", "📋 Agendados", "🧰 TEC-CAMPO"])
+def _handle_agendar_lote(
+    cliente: "jira.JiraAPI",
+    df_editado: pd.DataFrame,
+    data_agendada,
+    contexto: str,
+) -> None:
+    selecionados = _filtrar_selecionados(df_editado)
+    if selecionados.empty:
+        st.error("Selecione ao menos um chamado para agendar.")
+        return
+    if not data_agendada:
+        st.error("Selecione uma data antes de agendar.")
+        return
 
-    with t1:
-        filtro_loja_pend = st.text_input("🔎 Filtrar por loja (código ou cidade) — Pendentes", "")
-        if not pendentes_raw:
-            st.warning("Nenhum chamado em **AGENDAMENTO**.")
-        else:
-            for loja, iss in sorted(jira.agrupar_chamados(pendentes_raw).items()):
-                data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
-                alerta = " 🔴" if is_loja_critica(data) else ""
-                if filtro_loja_pend:
-                    if filtro_loja_pend.lower() not in loja.lower():
-                        cidades = {x.get("cidade", "") for x in iss}
-                        if not any(filtro_loja_pend.lower() in (c or "").lower() for c in cidades):
-                            continue
-                with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s)", expanded=False):
-                    st.code(gerar_mensagem(loja, iss), language="text")
+    chaves = [str(chave) for chave in selecionados["key"] if chave]
+    if not chaves:
+        st.error("Não foi possível identificar as chaves selecionadas.")
+        return
 
-    with t2:
-        filtro_loja_ag = st.text_input("🔎 Filtrar por loja (código ou cidade) — Agendados", "")
-        if not agendados_raw:
-            st.info("Nenhum chamado em **Agendado**.")
-        else:
-            for date, stores in sorted(grouped_sched.items()):
-                total = sum(len(v) for v in stores.values())
-                st.subheader(f"{date} — {total} chamado(s)")
-                for loja, iss in sorted(stores.items()):
-                    data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
-                    alerta = " 🔴" if is_loja_critica(data) else ""
-
-                    if filtro_loja_ag and filtro_loja_ag.lower() not in loja.lower():
-                        cidades = {(x.get("fields", {}) or {}).get("customfield_11994") for x in iss}
-                        if not any(filtro_loja_ag.lower() in (c or "").lower() for c in cidades):
-                            continue
-
-                    detalhes = jira.agrupar_chamados(iss)[loja]
-                    dup_keys = [d["key"] for d in detalhes
-                                if (d["pdv"], d["ativo"]) in verificar_duplicidade(detalhes)]
-
-                    # Mantido: checagem spare por loja
-                    spare_raw, _ = jira.buscar_chamados_enhanced(
-                        f'project = FSA AND status = "Aguardando Spare" AND "Codigo da Loja[Dropdown]" = "{loja}"',
-                        FIELDS, page_size=100
-                    )
-                    spare_keys = [i["key"] for i in (spare_raw or [])]
-
-                    tags = []
-                    if spare_keys: tags.append("Spare: " + ", ".join(spare_keys))
-                    if dup_keys:   tags.append("Dup: " + ", ".join(dup_keys))
-                    tag_str = f" [{' • '.join(tags)}]" if tags else ""
-
-                    with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s){tag_str}", expanded=False):
-                        st.markdown("**FSAs:** " + ", ".join(d["key"] for d in detalhes))
-                        st.code(gerar_mensagem(loja, detalhes), language="text")
-
-    with t3:
-        filtro_loja_tc = st.text_input("🔎 Filtrar por loja (código ou cidade) — TEC-CAMPO", "")
-        if not tec_raw:
-            st.info("Nenhum chamado em **TEC-CAMPO**.")
-        else:
-            for loja, iss in sorted(agrup_tec.items()):
-                data = contagem_por_loja.get(loja, {"qtd": len(iss), "last_updated": None})
-                alerta = " 🔴" if is_loja_critica(data) else ""
-                if filtro_loja_tc:
-                    if filtro_loja_tc.lower() not in loja.lower():
-                        cidades = {x.get("cidade", "") for x in iss}
-                        if not any(filtro_loja_tc.lower() in (c or "").lower() for c in cidades):
-                            continue
-                with st.expander(f"{alerta} {loja} — {len(iss)} chamado(s)", expanded=False):
-                    st.code(gerar_mensagem(loja, iss), language="text")
-
-    st.markdown("---")
-    st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
-
-# ============================
-# 📊 Visão Geral
-# ============================
-with tab_overview:
-    # Presets
-    with st.expander("🔖 Favoritos / Filtros salvos"):
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.write("Ajustes rápidos do painel:")
-            st.session_state.filters["threshold"] = st.number_input(
-                "Mín. chamados p/ destaque", min_value=2, max_value=50, value=int(st.session_state.filters["threshold"]), step=1
-            )
-            st.session_state.filters["uf"] = st.text_input("Filtrar UF (ex.: SP)", value=st.session_state.filters["uf"])
-            st.session_state.filters["q"] = st.text_input("Buscar loja/cidade (destaques)", value=st.session_state.filters["q"])
-            st.session_state.filters["days"] = st.slider(
-                "Janela do gráfico (dias)", min_value=7, max_value=90, value=int(st.session_state.filters["days"]), step=1
-            )
-        with c2:
-            preset_names = ["—"] + sorted(st.session_state.presets.keys())
-            pick = st.selectbox("Carregar preset", preset_names, index=0)
-            if pick != "—":
-                if st.button("Carregar"):
-                    st.session_state.filters.update(st.session_state.presets[pick])
-                    st.success(f"Preset '{pick}' carregado.")
-                    st.experimental_rerun()
-                if st.button("Excluir"):
-                    st.session_state.presets.pop(pick, None)
-                    st.success(f"Preset '{pick}' excluído.")
-            new_name = st.text_input("Salvar como…", "")
-            if st.button("Salvar preset") and new_name.strip():
-                st.session_state.presets[new_name.strip()] = dict(st.session_state.filters)
-                st.success(f"Preset '{new_name.strip()}' salvo.")
-
-    st.markdown("")
-    colk1, colk2, colk3, colk4 = st.columns(4)
-    colk1.metric("⏳ AGENDAMENTO", kpi["AGENDAMENTO"])
-    colk2.metric("📋 Agendado",   kpi["Agendado"])
-    colk3.metric("🧰 TEC-CAMPO",  kpi["TEC-CAMPO"])
-    colk4.metric("🏷️ Lojas com 2+", sum(1 for x in contagem_por_loja.values() if x["qtd"] >= 2))
-
-    st.markdown("")
-    st.subheader("📌 Top 5 lojas mais críticas")
-    if top_list:
-        tcols = st.columns(len(top_list))
-        for idx, card in enumerate(top_list):
-            with tcols[idx]:
-                indicador = "🔴 " if card["critica"] else ""
-                last_upd = card["last_updated"].astimezone(timezone.utc).strftime("%d/%m %H:%M") if card["last_updated"] else "—"
-                st.metric(
-                    label=f"{indicador}{card['loja']} • {card['cidade']}-{card['uf']}",
-                    value=card["qtd"],
-                    delta=f"Últ. atualização: {last_upd}"
+    conflitos: List[Dict[str, Any]] = []
+    if "data_agendada" in selecionados.columns:
+        for _, linha in selecionados.iterrows():
+            atual = linha.get("data_agendada")
+            if pd.isna(atual) or not atual:
+                continue
+            atual_dt = pd.to_datetime(atual, errors="coerce")
+            if pd.isna(atual_dt):
+                continue
+            if atual_dt.date() != data_agendada:
+                conflitos.append(
+                    {
+                        "key": str(linha.get("key")),
+                        "data": atual_dt.strftime("%d/%m/%Y"),
+                    }
                 )
+
+    if conflitos:
+        conflito_chaves = {item["key"] for item in conflitos if item.get("key")}
+        with st.warning(
+            "Alguns chamados já possuem data de agendamento diferente. Como deseja proceder?",
+            icon="⚠️",
+        ):
+            for conflito in conflitos:
+                st.write(f"{conflito['key']}: {conflito['data']}")
+            escolha = st.radio(
+                "Opção",
+                (
+                    "Cancelar",
+                    "Sobrescrever datas existentes",
+                    "Pular chamados com data diferente",
+                ),
+                index=0,
+                key=f"confirma_agendamento_{contexto}",
+            )
+        if escolha == "Cancelar":
+            st.info("Agendamento cancelado pelo usuário.")
+            return
+        if escolha == "Pular chamados com data diferente":
+            chaves = [ch for ch in chaves if ch not in conflito_chaves]
+            if not chaves:
+                st.error("Nenhum chamado restante para agendar após ignorar conflitos.")
+                return
+
+    nova_data_iso = datetime.combine(data_agendada, time(hour=8, minute=0)).isoformat()
+    with st.status("Agendando chamados...", expanded=True) as status_box:
+        try:
+            resumo = jira.atualizar_agendamento_lote(cliente, chaves, nova_data_iso)
+            status_box.write(
+                f"Atualizados: {resumo['sucesso']} de {resumo['total']} chamados."
+            )
+            if resumo["falhas"]:
+                for falha in resumo["falhas"]:
+                    status_box.write(
+                        f"Falha em {falha.get('key')}: {falha.get('erro', 'Motivo não informado')}"
+                    )
+            status_box.update(label="Agendamento concluído!", state="complete", expanded=False)
+            st.toast("Agendamento atualizado!", icon="✅")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as erro:  # pragma: no cover - feedback ao usuário
+            status_box.update(label=f"Erro ao agendar: {erro}", state="error")
+
+
+def _handle_despachar_mover(
+    cliente: "jira.JiraAPI",
+    df_editado: pd.DataFrame,
+    mensagem: str,
+    destino: str,
+) -> None:
+    selecionados = _filtrar_selecionados(df_editado)
+    if selecionados.empty:
+        st.error("Selecione ao menos um chamado para despachar.")
+        return
+
+    chaves = [str(chave) for chave in selecionados["key"] if chave]
+    if not chaves:
+        st.error("Não foi possível identificar as chaves selecionadas.")
+        return
+
+    with st.status("Despachando chamados...", expanded=True) as status_box:
+        if pyperclip:
+            try:
+                pyperclip.copy(mensagem)
+                status_box.write("Mensagem copiada para a área de transferência.")
+            except Exception as erro:  # pragma: no cover
+                status_box.write(f"Não foi possível copiar automaticamente: {erro}")
+        else:
+            status_box.write("Copie manualmente a mensagem exibida acima.")
+
+        try:
+            resumo = jira.transicionar_chamados(cliente, chaves, destino)
+            status_box.write(
+                f"Movidos: {resumo['sucesso']} de {resumo['total']} chamados para {destino}."
+            )
+            if resumo["falhas"]:
+                for falha in resumo["falhas"]:
+                    motivo = falha.get("erro") or falha.get("detalhe") or "Motivo não informado"
+                    status_box.write(f"Falha em {falha.get('key')}: {motivo}")
+            status_box.update(label="Despacho concluído!", state="complete", expanded=False)
+            st.toast("Chamados despachados!", icon="✅")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as erro:  # pragma: no cover
+            status_box.update(label=f"Erro ao transicionar: {erro}", state="error")
+
+
+def _icone_idade(created: Any) -> str:
+    if not created:
+        return "⚪"
+    dt = pd.to_datetime(created, utc=True, errors="coerce")
+    if pd.isna(dt):
+        return "⚪"
+    agora = pd.Timestamp.now(tz="UTC")
+    dias = (agora - dt).days
+    amarelo = _obter_limite_sla("sla_amarelo", 3)
+    vermelho = _obter_limite_sla("sla_vermelho", 7)
+    if vermelho < amarelo:
+        vermelho = amarelo
+    if dias >= vermelho:
+        return "🔴"
+    if dias >= amarelo:
+        return "🟡"
+    return "🟢"
+
+
+def _idade_dias(created: Any) -> Optional[int]:
+    if not created:
+        return None
+    dt = pd.to_datetime(created, utc=True, errors="coerce")
+    if pd.isna(dt):
+        return None
+    agora = pd.Timestamp.now(tz="UTC")
+    return (agora - dt).days
+
+
+def _icone_tempo_status(dias: Optional[int]) -> str:
+    if dias is None:
+        return "⚪"
+    amarelo = _obter_limite_sla("sla_amarelo", 3)
+    vermelho = _obter_limite_sla("sla_vermelho", 7)
+    if vermelho < amarelo:
+        vermelho = amarelo
+    if dias >= vermelho:
+        return "🔴"
+    if dias >= amarelo:
+        return "🟡"
+    return "🟢"
+
+
+def _formatar_tempo_status(dias: Optional[int]) -> str:
+    if dias is None:
+        return "--"
+    return f"{_icone_tempo_status(dias)} {dias}d"
+
+
+def _obter_tecnicos_df() -> pd.DataFrame:
+    base = st.session_state.get(TEC_LIST_KEY)
+    if isinstance(base, pd.DataFrame):
+        df = base.copy()
+    elif isinstance(base, list):
+        df = pd.DataFrame(base)
+    elif isinstance(base, dict):
+        df = pd.DataFrame([base])
     else:
-        st.info("Sem dados para o ranking.")
+        df = pd.DataFrame()
 
-    st.markdown("")
-    st.subheader("📈 Tendência (últimos dias)")
+    if df.empty:
+        df = pd.DataFrame(columns=["Nome", "Contato", "Região"])
 
-    all_days = pd.date_range(
-        (datetime.now() - timedelta(days=int(st.session_state.filters["days"]))).date(),
-        datetime.now().date(),
-        freq="D"
+    col_map: Dict[str, str] = {}
+    for col in list(df.columns):
+        chave = str(col).strip().lower()
+        if chave in {"nome", "name", "tecnico", "técnico"}:
+            col_map[col] = "Nome"
+        elif chave in {"contato", "phone", "telefone", "whatsapp"}:
+            col_map[col] = "Contato"
+        elif chave in {"regiao", "região", "zona", "area", "área"}:
+            col_map[col] = "Região"
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    for coluna in ("Nome", "Contato", "Região"):
+        if coluna not in df.columns:
+            df[coluna] = ""
+
+    return df
+
+
+def _opcoes_tecnicos(regiao_alvo: Optional[str]) -> List[Dict[str, Any]]:
+    df = _obter_tecnicos_df()
+    if df.empty:
+        return []
+
+    df = df.fillna("")
+    if regiao_alvo and "Região" in df.columns:
+        regiao_norm = str(regiao_alvo).strip().lower()
+        regioes_series = df["Região"].astype(str).str.strip().str.lower()
+        preferidos = df[regioes_series == regiao_norm]
+        demais = df[regioes_series != regiao_norm]
+        df = pd.concat([preferidos, demais], ignore_index=True)
+
+    opcoes: List[Dict[str, Any]] = []
+    vistos = set()
+    for _, linha in df.iterrows():
+        nome = str(linha.get("Nome", "")).strip()
+        if not nome:
+            continue
+        if nome in vistos:
+            continue
+        vistos.add(nome)
+        opcoes.append(
+            {
+                "nome": nome,
+                "regiao": str(linha.get("Região", "")).strip(),
+                "contato": str(linha.get("Contato", "")).strip(),
+            }
+        )
+    return opcoes
+
+
+def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
+    df = pd.DataFrame(chamados)
+    if df.empty:
+        return df
+
+    df["Prioridade"] = df["created"].apply(_icone_idade)
+    df["Idade (dias)"] = df["created"].apply(_idade_dias)
+    df["Criado em"] = pd.to_datetime(df["created"], errors="coerce", utc=True).dt.tz_convert("America/Sao_Paulo").dt.strftime("%d/%m/%Y %H:%M")
+    df["Agendado para"] = df["data_agendada"].apply(_formatar_data_agendada)
+    if "historico_alerta" in df.columns:
+        df["Histórico"] = df["historico_alerta"].fillna("")
+    else:
+        df["Histórico"] = ""
+    if "dias_no_status" in df.columns:
+        df["Tempo no Status Atual"] = df["dias_no_status"].apply(_formatar_tempo_status)
+    else:
+        df["Tempo no Status Atual"] = "--"
+
+    colunas = [
+        "Prioridade",
+        "Idade (dias)",
+        "key",
+        "status",
+        "loja_codigo",
+        "loja",
+        "pdv",
+        "ativo",
+        "problema",
+        "Agendado para",
+        "Criado em",
+        "Tempo no Status Atual",
+        "Histórico",
+        "resumo",
+        "endereco",
+        "estado",
+        "cidade",
+        "cep",
+    ]
+
+    existentes = [col for col in colunas if col in df.columns]
+    restantes = [col for col in df.columns if col not in existentes]
+    df = df[existentes + restantes]
+    return df
+
+
+def _renderizar_lojas(
+    cliente: "jira.JiraAPI",
+    chamados: List[Dict[str, Any]],
+    spare_keys: set[str],
+    termo_busca: str,
+    chave_status: str,
+    modo_compacto: bool = False,
+) -> None:
+    chamados_filtrados = _filtrar_por_busca(chamados, termo_busca)
+    agrupados = cliente.agrupar_chamados(chamados_filtrados)
+
+    if not agrupados:
+        st.info("Nenhum chamado encontrado com os filtros atuais.")
+        return
+
+    for loja_codigo in sorted(agrupados.keys(), key=str.casefold):
+        chamados_loja = agrupados[loja_codigo]
+        if not chamados_loja:
+            continue
+
+        loja_nome = chamados_loja[0].get("loja")
+        descricao_loja = loja_nome or loja_codigo
+        if loja_nome and loja_nome != loja_codigo:
+            descricao_loja = f"{loja_codigo} — {loja_nome}"
+
+        aguardando_spare = [ch for ch in chamados_loja if ch.get("key") in spare_keys]
+        header = f"{descricao_loja} ({len(chamados_loja)})"
+        with st.expander(header, expanded=False):
+            if aguardando_spare:
+                st.warning(
+                    "Chamados aguardando Spare: "
+                    + ", ".join(str(ch.get("key")) for ch in aguardando_spare if ch.get("key")),
+                    icon="⚠️",
+                )
+
+            duplicados = verificar_duplicidade(chamados_loja)
+            if duplicados:
+                descricao_dup = ", ".join(f"PDV {pdv} / Ativo {ativo}" for pdv, ativo in sorted(duplicados))
+                st.warning(
+                    "Possíveis duplicidades identificadas para esta loja: " + descricao_dup,
+                    icon="🚨",
+                )
+
+            nota_key = f"nota_{chave_status}_{loja_codigo}"
+            if nota_key not in st.session_state:
+                st.session_state[nota_key] = ""
+            st.text_area(
+                "Notas rápidas",
+                key=nota_key,
+                placeholder="Registre observações importantes desta loja...",
+                height=80,
+            )
+            if st.button("Salvar Nota", key=f"btn_salvar_nota_{chave_status}_{loja_codigo}"):
+                st.toast("Nota salva nesta sessão.", icon="💾")
+
+            regiao_key = f"regiao_{loja_codigo}"
+            if regiao_key not in st.session_state:
+                st.session_state[regiao_key] = ""
+            regiao_loja = st.text_input(
+                "Região/Zona desta loja",
+                key=regiao_key,
+                placeholder="Informe para sugerir técnicos automaticamente...",
+            )
+
+            opcoes_tecnicos = _opcoes_tecnicos(regiao_loja)
+            if opcoes_tecnicos:
+                nomes = ["-- Selecionar técnico --"] + [
+                    f"{item['nome']}" + (f" — {item['regiao']}" if item["regiao"] else "")
+                    for item in opcoes_tecnicos
+                ]
+                tecnico_key = f"tecnico_externo_{chave_status}_{loja_codigo}"
+                selecao = st.selectbox(
+                    "Associar Técnico (controle interno)",
+                    nomes,
+                    key=tecnico_key,
+                )
+                if selecao != "-- Selecionar técnico --":
+                    indice = nomes.index(selecao) - 1
+                    if 0 <= indice < len(opcoes_tecnicos):
+                        contato = opcoes_tecnicos[indice]["contato"]
+                        if contato:
+                            st.caption(f"Contato sugerido: {contato}")
+            else:
+                st.caption("Carregue sua lista de técnicos na aba Configurações para sugestões personalizadas.")
+
+            if modo_compacto:
+                datas_criacao = [
+                    pd.to_datetime(ch.get("created"), utc=True, errors="coerce")
+                    for ch in chamados_loja
+                ]
+                datas_validas = [dt for dt in datas_criacao if not pd.isna(dt)]
+                mais_antigo = min(datas_validas).tz_convert("America/Sao_Paulo") if datas_validas else None
+                resumo_status = pd.Series([ch.get("status") for ch in chamados_loja]).value_counts()
+                st.markdown(
+                    "\n".join(
+                        [
+                            f"Chamados: **{len(chamados_loja)}**",
+                            "Status:" + ", ".join(f" {status} ({qtd})" for status, qtd in resumo_status.items()),
+                            (
+                                f"Chamado mais antigo: {mais_antigo.strftime('%d/%m/%Y %H:%M') if mais_antigo else '--'}"
+                            ),
+                        ]
+                    )
+                )
+                st.info("Desative o Modo Compacto para visualizar mensagens e ações em lote.")
+                continue
+
+            df_loja = montar_dataframe_chamados(chamados_loja)
+            if df_loja.empty:
+                st.info("Sem dados tabulares para esta loja.")
+                continue
+
+            df_editor = df_loja.copy()
+            df_editor.insert(0, "Detalhes", False)
+            df_editor.insert(0, "Selecionar", False)
+            column_config = {
+                "Selecionar": st.column_config.CheckboxColumn(
+                    "Selecionar",
+                    help="Marque os chamados que deseja incluir nas ações em lote.",
+                    default=False,
+                ),
+                "Detalhes": st.column_config.CheckboxColumn(
+                    "👁️ Detalhes",
+                    help="Marque para revelar informações completas do chamado abaixo.",
+                    default=False,
+                ),
+            }
+            for coluna in df_loja.columns:
+                column_config[coluna] = st.column_config.Column(coluna, disabled=True)
+
+            df_editado = st.data_editor(
+                df_editor,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config=column_config,
+                key=f"editor_{chave_status}_{loja_codigo}",
+            )
+            if not isinstance(df_editado, pd.DataFrame):
+                df_editado = pd.DataFrame(df_editado)
+
+            selecionados_df = _filtrar_selecionados(df_editado)
+            selecionados_keys = (
+                {str(chave) for chave in selecionados_df["key"].tolist() if chave}
+                if not selecionados_df.empty
+                else set()
+            )
+            if selecionados_keys:
+                chamados_para_mensagem = [
+                    chamado
+                    for chamado in chamados_loja
+                    if str(chamado.get("key")) in selecionados_keys
+                ]
+            else:
+                chamados_para_mensagem = chamados_loja
+
+            detalhes_marcados = []
+            if "Detalhes" in df_editado.columns:
+                detalhes_marcados = df_editado[df_editado["Detalhes"].fillna(False)]
+            for _, linha in detalhes_marcados.iterrows():
+                chave_chamado = linha.get("key")
+                registro = next(
+                    (item for item in chamados_loja if item.get("key") == chave_chamado),
+                    {},
+                )
+                with st.expander(f"Detalhes do chamado {chave_chamado}", expanded=True):
+                    st.markdown(
+                        "\n".join(
+                            [
+                                f"**Resumo:** {registro.get('resumo', '--')}",
+                                f"**Problema:** {registro.get('problema', '--')}",
+                                f"**Endereço:** {registro.get('endereco', '--')} - {registro.get('cidade', '--')} / {registro.get('estado', '--')}",
+                                f"**CEP:** {registro.get('cep', '--')}",
+                                f"**Tempo no status:** {linha.get('Tempo no Status Atual', '--')}",
+                                f"**Histórico:** {registro.get('historico_alerta', '--')}",
+                                (f"**Descrição completa:**\n{registro.get('descricao_completa')}" if registro.get('descricao_completa') else ""),
+                            ]
+                        )
+                    )
+
+            template_opcoes = list(TEMPLATES_DISPONIVEIS.keys())
+            template_label = st.selectbox(
+                "Template da mensagem",
+                template_opcoes,
+                format_func=lambda key: TEMPLATES_DISPONIVEIS[key],
+                key=f"template_{chave_status}_{loja_codigo}",
+            )
+
+            mensagem = gerar_mensagem(
+                descricao_loja,
+                chamados_para_mensagem,
+                template_id=template_label,
+            )
+            st.code(mensagem, language="markdown")
+            st.caption("Copie a mensagem acima antes de confirmar o despacho.")
+
+            col_agenda, col_agendar, col_despachar = st.columns([2, 1, 1])
+            data_agendada = col_agenda.date_input(
+                "Agendar selecionados para:",
+                key=f"data_agendar_{chave_status}_{loja_codigo}",
+                format="DD/MM/YYYY",
+            )
+
+            if col_agendar.button(
+                "Agendar Selecionados",
+                key=f"btn_agendar_{chave_status}_{loja_codigo}",
+            ):
+                _handle_agendar_lote(
+                    cliente,
+                    df_editado,
+                    data_agendada,
+                    contexto=f"{chave_status}_{loja_codigo}",
+                )
+
+            if col_despachar.button(
+                "Despachar Selecionados",
+                key=f"btn_transicionar_{chave_status}_{loja_codigo}",
+            ):
+                _handle_despachar_mover(
+                    cliente,
+                    df_editado,
+                    mensagem,
+                    STATUS_DESTINO_TEC_CAMPO,
+                )
+
+
+def _renderizar_agenda(cliente: "jira.JiraAPI", chamados: List[Dict[str, Any]]) -> None:
+    agrupados = cliente.agrupar_chamados(chamados)
+    normalizados = [ch for ch in _flatten_agrupado(agrupados) if ch.get("data_agendada")]
+
+    if not normalizados:
+        st.info("Não há chamados com data de agendamento definida.")
+        return
+
+    eventos = []
+    for chamado in normalizados:
+        inicio = pd.to_datetime(chamado["data_agendada"], errors="coerce", utc=True)
+        if pd.isna(inicio):
+            continue
+        fim = inicio + pd.Timedelta(hours=1)
+        eventos.append(
+            {
+                "title": f"{chamado.get('key')} — {chamado.get('loja_codigo')}",
+                "start": inicio.isoformat(),
+                "end": fim.isoformat(),
+            }
+        )
+
+    if not eventos:
+        st.info("Não foi possível montar eventos válidos para o calendário.")
+        return
+
+    if calendar is None:
+        st.warning("streamlit-calendar não está disponível. Verifique as dependências.")
+        st.json(eventos)
+        return
+
+    options = {
+        "initialView": "timeGridWeek",
+        "locale": "pt-br",
+        "slotMinTime": "06:00:00",
+        "slotMaxTime": "22:00:00",
+        "height": 700,
+    }
+    calendar(events=eventos, options=options)
+
+
+def _renderizar_dashboard(cliente: "jira.JiraAPI", chamados: List[Dict[str, Any]]) -> None:
+    agrupados = cliente.agrupar_chamados(chamados)
+    normalizados = _flatten_agrupado(agrupados)
+    if not normalizados:
+        st.info("Nenhum dado disponível para o dashboard.")
+        return
+
+    df = montar_dataframe_chamados(normalizados)
+    if df.empty:
+        st.info("Nenhum dado disponível para o dashboard.")
+        return
+
+    st.subheader("Distribuição por Status")
+    contagem_status = df["status"].value_counts().sort_values(ascending=False)
+    st.bar_chart(contagem_status)
+
+    st.subheader("Chamados por Loja")
+    contagem_loja = df["loja_codigo"].value_counts().sort_values(ascending=False)
+    st.bar_chart(contagem_loja)
+
+    st.subheader("Tendência de Abertura (Created)")
+    datas_criacao = (
+        pd.to_datetime(df["created"], errors="coerce", utc=True)
+        .dt.tz_convert("America/Sao_Paulo")
+        .dt.date
+    )
+    tendencia = datas_criacao.value_counts().sort_index()
+    st.line_chart(tendencia)
+
+    lojas_disponiveis = sorted(df["loja_codigo"].dropna().unique())
+    if lojas_disponiveis:
+        selecao_lojas = st.multiselect(
+            "Comparar lojas",
+            lojas_disponiveis,
+            default=lojas_disponiveis[: min(2, len(lojas_disponiveis))],
+        )
+        if selecao_lojas:
+            df_sel = df[df["loja_codigo"].isin(selecao_lojas)].copy()
+            if df_sel.empty:
+                st.info("Sem dados para as lojas selecionadas.")
+            else:
+                df_sel["Data"] = (
+                    pd.to_datetime(df_sel["created"], errors="coerce", utc=True)
+                    .dt.tz_convert("America/Sao_Paulo")
+                    .dt.date
+                )
+                st.subheader("Comparativo: Chamados abertos por dia")
+                serie_comparativa = df_sel.groupby(["Data", "loja_codigo"]).size().unstack(fill_value=0)
+                st.line_chart(serie_comparativa)
+
+                if "problema" in df_sel.columns:
+                    st.subheader("Distribuição de problemas nas lojas selecionadas")
+                    distrib = df_sel.groupby(["loja_codigo", "problema"]).size().unstack(fill_value=0)
+                    st.bar_chart(distrib)
+
+                st.subheader("Tempo médio em aberto (dias)")
+                tempo_medio = df_sel.groupby("loja_codigo")["Idade (dias)"].mean().round(1)
+                st.bar_chart(tempo_medio)
+
+
+def _renderizar_configuracoes() -> None:
+    st.subheader("Lista de Técnicos (controle interno)")
+    uploader = st.file_uploader(
+        "Carregar planilha de técnicos",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=False,
+    )
+    if uploader is not None:
+        try:
+            if uploader.name.lower().endswith(".csv"):
+                df_upload = pd.read_csv(uploader)
+            else:
+                df_upload = pd.read_excel(uploader)
+            st.session_state[TEC_LIST_KEY] = df_upload
+            st.success("Lista carregada com sucesso para esta sessão.")
+        except Exception as exc:
+            st.error(f"Não foi possível ler o arquivo enviado: {exc}")
+
+    df_tecnicos = _obter_tecnicos_df()
+    st.caption("As alterações realizadas aqui ficam salvas apenas durante a sessão atual.")
+    df_editado = st.data_editor(
+        df_tecnicos,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="editor_tecnicos",
+    )
+    if isinstance(df_editado, pd.DataFrame):
+        st.session_state[TEC_LIST_KEY] = df_editado
+
+
+def main() -> None:
+    st.sidebar.title("Configurações")
+
+    cliente = jira.conectar_jira()
+
+    jql_pendentes_default = st.secrets.get(
+        "JQL_PENDENTES",
+        "project = FSA AND Status in (AGENDAMENTO)",
+    )
+    jql_agendados_default = st.secrets.get(
+        "JQL_AGENDADOS",
+        "project = FSA AND Status = Agendado AND \"Data/Hora - Agendamento\" is not EMPTY",
+    )
+    jql_teccampo_default = st.secrets.get(
+        "JQL_TEC_CAMPO",
+        "project = FSA AND Status in (TEC-CAMPO)",
+    )
+    jql_spare_default = st.secrets.get(
+        "JQL_SPARE",
+        "project = FSA AND status = \"Aguardando Spare\"",
     )
 
-    novos = [created_from_issue(i) for i in (combo_raw or [])]
-    novos = [d for d in novos if d and (datetime.now(timezone.utc) - d) <= timedelta(days=int(st.session_state.filters["days"]))]
-    df_novos = pd.Series(1, index=[d.date() for d in novos]).groupby(level=0).sum() if novos else pd.Series(dtype=int)
+    defaults_state = {
+        "sla_amarelo": st.secrets.get("SLA_AMARELO", 3),
+        "sla_vermelho": st.secrets.get("SLA_VERMELHO", 7),
+        "jql_pendentes": jql_pendentes_default,
+        "jql_agendados": jql_agendados_default,
+        "jql_teccampo": jql_teccampo_default,
+        "jql_spare": jql_spare_default,
+    }
+    for chave, valor in defaults_state.items():
+        if chave not in st.session_state:
+            st.session_state[chave] = valor
 
-    resd = [resolutiondate_from_issue(i) for i in (resolvidos_raw or [])]
-    resd = [d for d in resd if d and (datetime.now(timezone.utc) - d) <= timedelta(days=int(st.session_state.filters["days"]))]
-    df_res = pd.Series(1, index=[d.date() for d in resd]).groupby(level=0).sum() if resd else pd.Series(dtype=int)
+    st.sidebar.number_input(
+        "SLA Amarelo (dias)",
+        min_value=0,
+        max_value=365,
+        step=1,
+        value=int(st.session_state.get("sla_amarelo", 3)),
+        key="sla_amarelo",
+    )
+    st.sidebar.number_input(
+        "SLA Vermelho (dias)",
+        min_value=0,
+        max_value=365,
+        step=1,
+        value=int(st.session_state.get("sla_vermelho", 7)),
+        key="sla_vermelho",
+    )
 
-    chart_df = pd.DataFrame({
-        "Novos": df_novos.reindex(all_days.date, fill_value=0),
-        "Resolvidos": df_res.reindex(all_days.date, fill_value=0),
-    }, index=[d.strftime("%d/%m") for d in all_days.date])
+    busca_texto = st.sidebar.text_input(
+        "Buscar chamados",
+        placeholder="Chave, loja, PDV, problema...",
+        key="busca_global",
+    )
 
-    st.line_chart(chart_df, use_container_width=True)
+    with st.sidebar.expander("Consultas JQL", expanded=False):
+        st.text_area(
+            "Pendentes",
+            value=st.session_state.get("jql_pendentes", jql_pendentes_default),
+            key="jql_pendentes",
+            height=120,
+        )
+        st.text_area(
+            "Agendados",
+            value=st.session_state.get("jql_agendados", jql_agendados_default),
+            key="jql_agendados",
+            height=120,
+        )
+        st.text_area(
+            "Tec-Campo",
+            value=st.session_state.get("jql_teccampo", jql_teccampo_default),
+            key="jql_teccampo",
+            height=120,
+        )
+        st.text_area(
+            "Spare",
+            value=st.session_state.get("jql_spare", jql_spare_default),
+            key="jql_spare",
+            height=120,
+        )
 
-    st.markdown("")
-    st.subheader("🗺️ Heatmap de lojas (auto, via endereço/CEP do Jira) — gratuito (OSM)")
+    if st.sidebar.button("Limpar Cache e Recarregar"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
 
-    @st.cache_data(ttl=60*60*24, show_spinner=False)
-    def geocode_nominatim(q: str):
-        url = "https://nominatim.openstreetmap.org/search"
-        headers = {"User-Agent": "FieldServiceDashboard/1.0 (contact: ops@empresa.com)"}
-        params = {"q": q, "format": "json", "limit": 1, "countrycodes": "br"}
-        try:
-            r = requests.get(url, headers=headers, params=params, timeout=10)
-            if r.status_code == 200 and r.json():
-                item = r.json()[0]
-                return float(item["lat"]), float(item["lon"])
-        except Exception:
-            return None
-        return None
+    jql_pendentes = st.session_state.get("jql_pendentes", jql_pendentes_default)
+    jql_agendados = st.session_state.get("jql_agendados", jql_agendados_default)
+    jql_teccampo = st.session_state.get("jql_teccampo", jql_teccampo_default)
+    jql_spare = st.session_state.get("jql_spare", jql_spare_default)
 
-    pontos = []
-    lojas_unicas = []
-    for loja, data in contagem_por_loja.items():
-        end = (data.get("endereco") or "").strip()
-        cid = (data.get("cidade") or "").strip()
-        uf  = (data.get("uf") or "").strip()
-        cep = (data.get("cep") or "").strip()
-        if not any([end, cid, uf, cep]):
-            continue
-        q = ", ".join([x for x in [end, cid, uf] if x]) + (f", {cep}" if cep else "") + ", Brasil"
-        lojas_unicas.append((loja, q, data["qtd"]))
+    chamados_pendentes = carregar_chamados(cliente, jql_pendentes)
+    chamados_agendados = carregar_chamados(cliente, jql_agendados)
+    chamados_teccampo = carregar_chamados(cliente, jql_teccampo)
+    chamados_spare = carregar_chamados(cliente, jql_spare)
 
-    with st.expander("⚙️ Configurar geocodificação", expanded=False):
-        st.caption("Usa Nominatim (OSM) com cache de 24h.")
-        max_geocode = st.slider("Máximo de lojas para geocodificar por execução", 10, 500, min(100, len(lojas_unicas)))
-        pause = st.slider("Pausa entre chamadas (segundos)", 0.0, 2.0, 0.5, 0.1)
-        run_geo = st.checkbox("Executar geocodificação agora", value=True)
+    spare_keys = {issue.get("key") for issue in chamados_spare if issue.get("key")}
+    todos_chamados = _deduplicar_chamados(
+        chamados_pendentes,
+        chamados_agendados,
+        chamados_teccampo,
+        chamados_spare,
+    )
 
-    if run_geo and lojas_unicas:
-        geocoded = 0
-        for loja, query, peso in lojas_unicas[:max_geocode]:
-            coords = geocode_nominatim(query)
-            if coords:
-                lat, lon = coords
-                pontos += [{"lat": lat, "lon": lon} for _ in range(max(1, int(peso)))]
-            geocoded += 1
-            if pause > 0:
-                time.sleep(pause)
+    tab_loja, tab_agenda, tab_dashboard, tab_config = st.tabs([
+        "Visão por Loja (Despacho)",
+        "🗓️ Agenda",
+        "📊 Dashboard",
+        "⚙️ Configurações",
+    ])
 
-        if pontos:
-            st.map(pd.DataFrame(pontos), use_container_width=True)
-        else:
-            st.info("Nenhuma loja geocodificada com sucesso nesta execução.")
-        st.caption(f"Geocodificadas: {geocoded} / {len(lojas_unicas)} loja(s)")
-    else:
-        st.info("Ative “Executar geocodificação agora” para gerar o mapa.")
+    with tab_loja:
+        st.subheader("Despacho por Loja")
+        modo_compacto = st.toggle(
+            "Modo Compacto",
+            key="modo_compacto",
+            help="Exibe apenas um resumo por loja quando ativado.",
+        )
+        secoes = [
+            ("Pendente Agendamento", chamados_pendentes),
+            ("Agendado", chamados_agendados),
+            ("Tec-Campo", chamados_teccampo),
+            ("Aguardando Spare", chamados_spare),
+        ]
+        abas_status = st.tabs([titulo for titulo, _ in secoes])
+        for (titulo, lista), aba in zip(secoes, abas_status):
+            with aba:
+                st.markdown(f"### {titulo}")
+                
+                # ESTA É A LÓGICA CORRIGIDA (VERSÃO ORIGINAL)
+                grupos_por_data = _agrupar_por_data_agendada_raw(lista)
+                if not grupos_por_data:
+                    st.info("Nenhum chamado encontrado com os filtros atuais.")
+                    continue
 
-    st.markdown("---")
-    st.caption(f"Última atualização: {datetime.now():%d/%m/%Y %H:%M:%S}")
+                for data_label, slug, itens in grupos_por_data:
+                    if data_label == "Sem data definida":
+                        # Renderiza "Sem data" apenas para abas que não sejam "Agendado"
+                        if titulo == "Agendado":
+                            continue
+                        st.subheader("Sem data de agendamento")
+                    else:
+                        st.subheader(f"Agenda de {data_label}")
+                    
+                    _renderizar_lojas(
+                        cliente,
+                        itens,
+                        spare_keys,
+                        busca_texto,
+                        f"{titulo}_{slug}", # Chave única para o status/data
+                        modo_compacto=modo_compacto,
+                    )
+
+    with tab_agenda:
+        st.subheader("Agenda de Chamados")
+        _renderizar_agenda(cliente, [ch for ch in todos_chamados if ch])
+
+    with tab_dashboard:
+        st.subheader("Indicadores Gerais")
+        _renderizar_dashboard(cliente, [ch for ch in todos_chamados if ch])
+
+    with tab_config:
+        _renderizar_configuracoes()
+
+
+if __name__ == "__main__":
+    main()
+
