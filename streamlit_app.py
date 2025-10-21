@@ -49,7 +49,7 @@ TEC_LIST_KEY = "tecnicos_df"
 
 @st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_client"})
 def _buscar_chamados_cache(cliente: "jira.JiraAPI", jql: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    return cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
+    return cliente.buscar_chamados_jql_paginado(jql, fields=CAMPOS_JIRA)
 
 
 def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
