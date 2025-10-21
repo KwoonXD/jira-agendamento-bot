@@ -150,9 +150,10 @@ class JiraAPI:
                     body["fields"] = fields_list
                 if expand:
                     body["expand"] = expand
-                # Alguns ambientes exigem ``jql`` mesmo no endpoint ``/search/jql``.
-                # Para compatibilidade ampla utilizamos a mesma chave em ambos casos.
-                body["jql"] = jql
+                if usa_nextpage:
+                    body["query"] = jql
+                else:
+                    body["jql"] = jql
                 if reconcile and not usa_nextpage:
                     body["reconcileIssues"] = []
                 if next_token is not None:
