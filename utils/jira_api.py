@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
@@ -401,7 +402,12 @@ def conectar_jira() -> "JiraAPI":
         getter = getattr(container, "get", None)
         if callable(getter):
             try:
-                return getter(chave)
+                return getter(chave, None)
+            except TypeError:
+                try:
+                    return getter(chave)
+                except KeyError:
+                    return None
             except KeyError:
                 return None
 
@@ -411,11 +417,11 @@ def conectar_jira() -> "JiraAPI":
             return None
 
     config_raw = _safe_get(raiz, "JIRA")
-    config = config_raw if isinstance(config_raw, dict) else {}
+    config = config_raw if isinstance(config_raw, Mapping) else {}
 
     def _buscar_chave(chaves: List[str]) -> Optional[str]:
         for chave in chaves:
-            if isinstance(config, dict) and chave in config and config[chave]:
+            if isinstance(config, Mapping) and chave in config and config[chave]:
                 return str(config[chave])
 
             valor_raiz = _safe_get(raiz, chave)
