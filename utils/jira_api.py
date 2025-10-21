@@ -358,14 +358,36 @@ def conectar_jira() -> "JiraAPI":
     """Cria (ou reutiliza) uma instância de :class:`JiraAPI` com base no ``st.secrets``."""
 
     raiz = st.secrets
-    config = raiz.get("JIRA") if isinstance(raiz.get("JIRA"), dict) else {}
+
+    def _safe_get(container: Any, chave: str) -> Any:
+        """Obtém valores de ``st.secrets`` (ou dicts) sem propagar ``KeyError``."""
+
+        if container is None:
+            return None
+
+        getter = getattr(container, "get", None)
+        if callable(getter):
+            try:
+                return getter(chave)
+            except KeyError:
+                return None
+
+        try:
+            return container[chave]  # type: ignore[index]
+        except (KeyError, TypeError):
+            return None
+
+    config_raw = _safe_get(raiz, "JIRA")
+    config = config_raw if isinstance(config_raw, dict) else {}
 
     def _buscar_chave(chaves: List[str]) -> Optional[str]:
         for chave in chaves:
-            if chave in config and config[chave]:
+            if isinstance(config, dict) and chave in config and config[chave]:
                 return str(config[chave])
-            if chave in raiz and raiz[chave]:
-                return str(raiz[chave])
+
+            valor_raiz = _safe_get(raiz, chave)
+            if valor_raiz:
+                return str(valor_raiz)
         return None
 
     email = _buscar_chave(["email", "EMAIL", "jira_email", "JIRA_EMAIL", "username", "USERNAME", "user", "USER"])
