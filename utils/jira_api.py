@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import requests
@@ -113,7 +113,7 @@ class JiraAPI:
     def buscar_chamados_enhanced(
         self,
         jql: str,
-        fields: str | List[str],
+        fields: Union[str, List[str]],
         page_size: int = 100,
         reconcile: bool = False,
     ) -> Tuple[List[dict], Dict[str, Any]]:
