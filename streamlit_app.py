@@ -59,10 +59,23 @@ def _flatten_por_loja(agrupados: Dict[str, List[Dict[str, Any]]]) -> List[Dict[s
     return chamados
 
 
-def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
+def montar_dataframe_chamados(
+    chamados: List[Dict[str, Any]],
+    mapa_tecnicos: Optional[Dict[str, Optional[str]]] = None,
+) -> pd.DataFrame:
     df = pd.DataFrame(chamados)
     if df.empty:
         return df
+
+    if mapa_tecnicos and "tecnico_account_id" in df.columns:
+        inverso = {acc: nome for nome, acc in mapa_tecnicos.items() if acc}
+        df["tecnico"] = df.get("tecnico_account_id").map(lambda acc: inverso.get(acc))
+
+    if "tecnico" in df.columns:
+        df["tecnico"] = (
+            df["tecnico"].fillna("").map(lambda valor: valor.strip() if isinstance(valor, str) else "")
+        )
+        df["tecnico"] = df["tecnico"].replace("", DEFAULT_TECNICO)
 
     df = df.drop(columns=["tecnico_account_id"], errors="ignore")
 
@@ -113,22 +126,11 @@ def _esta_sem_responsavel(issue: Dict[str, Any]) -> bool:
     return False
 
 
-def _obter_status_issue(issue: Dict[str, Any]) -> str:
-    fields = issue.get("fields", {}) or {}
-    status_info = fields.get("status")
-    if isinstance(status_info, dict):
-        nome = status_info.get("name")
-    elif isinstance(status_info, str):
-        nome = status_info
-    else:
-        nome = None
-    return (nome or DEFAULT_STATUS).strip()
-
-
 def _exibir_lojas(
     cliente: "jira.JiraAPI",
     issues: List[Dict[str, Any]],
     spare_keys: set[str],
+    mapa_tecnicos: Optional[Dict[str, Optional[str]]],
 ) -> None:
     if not issues:
         st.info("Nenhum chamado encontrado com os filtros selecionados.")
@@ -168,7 +170,7 @@ def _exibir_lojas(
             mensagem = gerar_mensagem(titulo_mensagem, chamados_loja)
             st.code(mensagem, language="markdown")
 
-            df_loja = montar_dataframe_chamados(chamados_loja)
+            df_loja = montar_dataframe_chamados(chamados_loja, mapa_tecnicos)
             if df_loja.empty:
                 st.info("Sem dados tabulares para esta loja.")
             else:
@@ -230,6 +232,7 @@ def _renderizar_nao_atribuidos(
 def _renderizar_atribuidos(
     cliente: "jira.JiraAPI",
     chamados: List[Dict[str, Any]],
+    mapa_tecnicos: Optional[Dict[str, Optional[str]]],
 ) -> None:
     if not chamados:
         st.info("Não há chamados atribuídos nas consultas carregadas.")
@@ -239,14 +242,21 @@ def _renderizar_atribuidos(
     normalizados = _flatten_por_loja(agrupados)
 
     por_tecnico: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    inverso = {}
+    if mapa_tecnicos:
+        inverso = {acc: nome for nome, acc in mapa_tecnicos.items() if acc}
+
     for chamado in normalizados:
-        tecnico = chamado.get("tecnico") or DEFAULT_TECNICO
-        por_tecnico[tecnico].append(chamado)
+        conta = chamado.get("tecnico_account_id")
+        nome_tecnico = inverso.get(conta) if conta else None
+        if not nome_tecnico:
+            nome_tecnico = chamado.get("tecnico") or DEFAULT_TECNICO
+        por_tecnico[nome_tecnico].append(chamado)
 
     for tecnico in sorted(por_tecnico.keys(), key=str.casefold):
         chamados_tecnico = por_tecnico[tecnico]
         with st.expander(f"{tecnico} ({len(chamados_tecnico)})", expanded=False):
-            df_tecnico = montar_dataframe_chamados(chamados_tecnico)
+            df_tecnico = montar_dataframe_chamados(chamados_tecnico, mapa_tecnicos)
             if df_tecnico.empty:
                 st.info("Sem dados para exibir.")
             else:
@@ -315,6 +325,7 @@ def main() -> None:
     todos_abertos = _deduplicar_chamados(
         chamados_pendentes, chamados_agendados, chamados_teccampo
     )
+    mapa_tecnicos = jira.get_lista_tecnicos(todos_abertos)
 
     tab_loja, tab_tecnico = st.tabs(
         ["Visão por Loja (Despacho)", "Visão por Técnico (Gestão)"]
@@ -323,27 +334,18 @@ def main() -> None:
     with tab_loja:
         st.subheader("Despacho por Loja")
 
-        status_disponiveis = jira.get_lista_status(todos_abertos)
-        if status_disponiveis:
-            status_selecionados = st.multiselect(
-                "Filtrar por Status",
-                status_disponiveis,
-                default=status_disponiveis,
-                key="filtro_status_loja",
-            )
-            if status_selecionados:
-                chamados_filtrados = [
-                    issue
-                    for issue in todos_abertos
-                    if _obter_status_issue(issue) in status_selecionados
-                ]
-            else:
-                chamados_filtrados = []
-        else:
-            st.info("Nenhum status encontrado nas consultas carregadas.")
-            chamados_filtrados = todos_abertos
+        secoes = [
+            ("Pendente Agendamento", chamados_pendentes),
+            ("Agendado", chamados_agendados),
+            ("Tec-Campo", chamados_teccampo),
+            ("Aguardando Spare", chamados_spare),
+        ]
 
-        _exibir_lojas(cliente, chamados_filtrados, spare_keys)
+        for indice, (titulo_secao, lista_chamados) in enumerate(secoes):
+            st.markdown(f"### {titulo_secao}")
+            _exibir_lojas(cliente, lista_chamados, spare_keys, mapa_tecnicos)
+            if indice < len(secoes) - 1:
+                st.divider()
 
     with tab_tecnico:
         st.subheader("Gestão por Técnico")
@@ -351,8 +353,6 @@ def main() -> None:
         if not todos_abertos:
             st.info("Nenhum chamado aberto nas consultas carregadas.")
             return
-
-        mapa_tecnicos = jira.get_lista_tecnicos(todos_abertos)
 
         aba_nao_atr, aba_atr = st.tabs(["Não Atribuídos", "Atribuídos"])
 
@@ -366,7 +366,7 @@ def main() -> None:
             atribuidos = [
                 issue for issue in todos_abertos if not _esta_sem_responsavel(issue)
             ]
-            _renderizar_atribuidos(cliente, atribuidos)
+            _renderizar_atribuidos(cliente, atribuidos, mapa_tecnicos)
 
 
 if __name__ == "__main__":

@@ -191,25 +191,58 @@ class JiraAPI:
             codigo: Optional[str] = None
             nome: Optional[str] = None
 
+            def _registrar_codigo(possivel: Optional[str]) -> None:
+                nonlocal codigo
+                if possivel and str(possivel).strip():
+                    codigo = codigo or str(possivel).strip()
+
+            def _registrar_nome(possivel: Optional[str]) -> None:
+                nonlocal nome
+                if possivel and str(possivel).strip():
+                    nome = nome or str(possivel).strip()
+
             if isinstance(valor, dict):
-                codigo = valor.get("value") or valor.get("id") or valor.get("key") or valor.get("code")
-                nome = valor.get("label") or valor.get("name") or valor.get("displayName")
+                chaves_codigo = (
+                    "value",
+                    "id",
+                    "key",
+                    "code",
+                    "codigo",
+                    "stringValue",
+                )
+                chaves_nome = (
+                    "label",
+                    "name",
+                    "displayName",
+                    "text",
+                    "descricao",
+                )
 
-                if not codigo and isinstance(valor.get("stringValue"), str):
-                    codigo = valor["stringValue"].strip()
+                for chave in chaves_codigo:
+                    _registrar_codigo(valor.get(chave))
+                for chave in chaves_nome:
+                    _registrar_nome(valor.get(chave))
 
-                for chave in ("child", "children", "parent"):
-                    nested = valor.get(chave)
-                    if nested is not None:
+                for chave_nested in (
+                    "child",
+                    "children",
+                    "parent",
+                    "values",
+                    "options",
+                    "childrenValues",
+                    "childOption",
+                ):
+                    nested = valor.get(chave_nested)
+                    if nested:
                         codigo_nested, nome_nested = _extrair_loja(nested)
-                        codigo = codigo or codigo_nested
-                        nome = nome or nome_nested
+                        _registrar_codigo(codigo_nested)
+                        _registrar_nome(nome_nested)
 
             elif isinstance(valor, list):
                 for item in valor:
                     codigo_item, nome_item = _extrair_loja(item)
-                    codigo = codigo or codigo_item
-                    nome = nome or nome_item
+                    _registrar_codigo(codigo_item)
+                    _registrar_nome(nome_item)
                     if codigo and nome:
                         break
 
@@ -218,11 +251,11 @@ class JiraAPI:
                 if texto:
                     if " - " in texto:
                         possivel_codigo, possivel_nome = texto.split(" - ", 1)
-                        codigo = possivel_codigo.strip() or codigo
-                        nome = possivel_nome.strip() or nome
+                        _registrar_codigo(possivel_codigo)
+                        _registrar_nome(possivel_nome)
                     else:
-                        codigo = codigo or texto
-                        nome = nome or texto
+                        _registrar_codigo(texto)
+                        _registrar_nome(texto)
 
             codigo_padrao = (codigo or nome or "Loja Desconhecida").strip()
             nome_padrao = (nome or codigo_padrao).strip()
@@ -237,9 +270,11 @@ class JiraAPI:
                         or responsavel.get("name")
                         or responsavel.get("emailAddress")
                     )
-                    if nome:
-                        account_id = responsavel.get("accountId")
-                        return str(nome).strip(), str(account_id).strip() if account_id else None
+                    account_id = responsavel.get("accountId")
+                    if nome or account_id:
+                        nome_norm = str(nome).strip() if nome else DEFAULT_TECNICO
+                        conta_norm = str(account_id).strip() if account_id else None
+                        return nome_norm or DEFAULT_TECNICO, conta_norm
                 elif isinstance(responsavel, str) and responsavel.strip():
                     return responsavel.strip(), None
             return DEFAULT_TECNICO, None
@@ -424,23 +459,76 @@ def conectar_jira() -> "JiraAPI":
 
 
 def get_lista_tecnicos(chamados_brutos: List[dict]) -> Dict[str, Optional[str]]:
-    """Retorna um dicionário ``displayName`` → ``accountId`` apenas para usuários válidos."""
+    """Retorna um dicionário ``displayName`` → ``accountId`` considerando o controle interno."""
 
     tecnicos: Dict[str, Optional[str]] = {"Ninguém": None}
 
-    for issue in chamados_brutos:
-        fields = issue.get("fields", {}) or {}
-        for chave in ("responsavel", "assignee"):
-            responsavel = fields.get(chave)
-            if isinstance(responsavel, dict):
-                nome = responsavel.get("displayName")
-                account_id = responsavel.get("accountId")
-                if nome and account_id:
-                    nome_norm = str(nome).strip()
-                    conta_norm = str(account_id).strip()
-                    if nome_norm and conta_norm and nome_norm not in tecnicos:
-                        tecnicos[nome_norm] = conta_norm
-                break
+    def _adicionar(nome: Optional[str], conta: Optional[str]) -> None:
+        if not nome:
+            return
+        nome_norm = str(nome).strip()
+        if not nome_norm:
+            return
+        conta_norm = str(conta).strip() if conta else None
+        if nome_norm not in tecnicos:
+            tecnicos[nome_norm] = conta_norm
+
+    # Preferência: configurado em ``st.secrets``.
+    try:
+        secrets = st.secrets  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - execução fora do Streamlit
+        secrets = {}
+
+    candidatos = []
+    if isinstance(secrets, dict):
+        for chave in ("TECNICOS", "tecnicos", "Tecnicos"):
+            if chave in secrets:
+                candidatos.append(secrets[chave])
+    else:
+        for chave in ("TECNICOS", "tecnicos", "Tecnicos"):
+            if chave in secrets:
+                candidatos.append(secrets[chave])
+
+    for bloco in candidatos:
+        if isinstance(bloco, dict):
+            for nome, info in bloco.items():
+                if isinstance(info, dict):
+                    conta = (
+                        info.get("account_id")
+                        or info.get("accountId")
+                        or info.get("id")
+                        or info.get("account")
+                    )
+                    _adicionar(info.get("nome") or nome, conta)
+                else:
+                    _adicionar(nome, info)
+        elif isinstance(bloco, list):
+            for item in bloco:
+                if isinstance(item, dict):
+                    nome = item.get("nome") or item.get("name") or item.get("displayName")
+                    conta = (
+                        item.get("account_id")
+                        or item.get("accountId")
+                        or item.get("id")
+                        or item.get("account")
+                    )
+                    _adicionar(nome, conta)
+
+    # Fallback: tenta identificar a partir dos chamados recebidos.
+    if len(tecnicos) == 1:
+        for issue in chamados_brutos:
+            fields = issue.get("fields", {}) or {}
+            for chave in ("responsavel", "assignee"):
+                responsavel = fields.get(chave)
+                if isinstance(responsavel, dict):
+                    _adicionar(
+                        responsavel.get("displayName")
+                        or responsavel.get("name")
+                        or responsavel.get("emailAddress"),
+                        responsavel.get("accountId"),
+                    )
+                elif isinstance(responsavel, str):
+                    _adicionar(responsavel, None)
 
     ordenados = {"Ninguém": None}
     for nome in sorted((n for n in tecnicos if n != "Ninguém"), key=str.casefold):
