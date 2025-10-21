@@ -31,6 +31,21 @@ CAMPOS_JIRA: List[str] = [
 ]
 
 
+def _formatar_data_agendada(valor: Any) -> str:
+    if valor in (None, "", "--"):
+        return "--"
+
+    try:
+        serie = pd.to_datetime(pd.Series([valor]), errors="coerce")
+    except Exception:  # pragma: no cover - valores inesperados
+        return "--"
+
+    dt = serie.iloc[0]
+    if pd.isna(dt):
+        return "--"
+    return dt.strftime("%d/%m/%Y %H:%M")
+
+
 @st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_api_client"})
 def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
     issues, _ = cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
@@ -87,7 +102,9 @@ def montar_dataframe_chamados(
         "pdv",
         "ativo",
         "problema",
+        "Agendado para",
         "data_agendada",
+        "data_agendada_original",
         "tecnico",
         "created",
     ]
@@ -96,9 +113,18 @@ def montar_dataframe_chamados(
     df = df[existentes + restantes]
 
     if "data_agendada" in df.columns:
-        df["data_agendada"] = pd.to_datetime(df["data_agendada"], errors="coerce").dt.strftime("%Y-%m-%d")
+        datas = pd.to_datetime(df["data_agendada"], errors="coerce")
+        df["data_agendada_formatada"] = datas.dt.strftime("%d/%m/%Y %H:%M")
+        df["data_agendada_formatada"] = df["data_agendada_formatada"].fillna("--")
+        df["data_agendada"] = datas.dt.strftime("%Y-%m-%dT%H:%M")
+        df["data_agendada"] = df["data_agendada"].fillna("--")
+        if "data_agendada_raw" in df.columns:
+            df = df.rename(columns={"data_agendada_raw": "data_agendada_original"})
+        df = df.rename(columns={"data_agendada_formatada": "Agendado para"})
+    if "data_agendada" not in df.columns and "data_agendada_raw" in df.columns:
+        df = df.rename(columns={"data_agendada_raw": "data_agendada_original"})
     if "created" in df.columns:
-        df["created"] = pd.to_datetime(df["created"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+        df["created"] = pd.to_datetime(df["created"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
     return df
 
 
@@ -199,10 +225,18 @@ def _renderizar_nao_atribuidos(
             descricao_loja = f"{loja_codigo} — {loja_nome}"
         col_info, col_select, col_botao = st.columns([4, 3, 1])
 
+        data_agendada = (
+            chamado.get("data_agendada")
+            or chamado.get("data_agendada_raw")
+            or chamado.get("data_agendada_original")
+        )
+        data_agendada_fmt = _formatar_data_agendada(data_agendada)
+
         col_info.markdown(
             f"**{chave}** — {chamado.get('resumo', '--')}  \n"
             f"Loja: {descricao_loja}  \n"
-            f"Status: {chamado.get('status', DEFAULT_STATUS)}"
+            f"Status: {chamado.get('status', DEFAULT_STATUS)}  \n"
+            f"Agendado para: {data_agendada_fmt}"
         )
 
         selecionado = col_select.selectbox(
