@@ -1,100 +1,147 @@
 import streamlit as st; st.set_page_config(page_title="🤖 Agenda Field Service", page_icon="🤖", layout="wide")
 import pandas as pd
-from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from datetime import datetime, time
+from typing import Any, Dict, Iterable, List
 
 try:
-    from utils import jira_api as jira  # type: ignore
-    from utils.messages import gerar_mensagem
-except Exception as exc:  # pragma: no cover - fallback para depurações locais
-    raise RuntimeError("Não foi possível importar módulos utilitários") from exc
+    import pyperclip
+except Exception:  # pragma: no cover - fallback em ambientes sem clipboard
+    pyperclip = None
 
+try:
+    from streamlit_calendar import calendar
+except Exception as exc:  # pragma: no cover - feedback em runtime
+    calendar = None  # type: ignore
 
-DEFAULT_TECNICO = getattr(jira, "DEFAULT_TECNICO", "Sem técnico definido")
-DEFAULT_STATUS = getattr(jira, "DEFAULT_STATUS", "--")
+from utils import jira_api as jira
+from utils.messages import (
+    TEMPLATES_DISPONIVEIS,
+    gerar_mensagem,
+)
 
 CAMPOS_JIRA: List[str] = [
-    "responsavel",
-    "assignee",
     "status",
     "summary",
-    "customfield_14829",
-    "customfield_14825",
-    "customfield_12374",
-    "customfield_12271",
-    "customfield_11948",
-    "customfield_11993",
-    "customfield_11994",
-    "customfield_12036",
-    "customfield_14954",
     "created",
+    "customfield_14829",  # PDV
+    "customfield_14825",  # Ativo
+    "customfield_12374",  # Problema
+    "customfield_12271",  # Endereço
+    "customfield_11948",  # Estado
+    "customfield_11993",  # CEP
+    "customfield_11994",  # Cidade
+    "customfield_12036",  # Data agendada
+    "customfield_14954",  # Loja
 ]
 
-
-def _formatar_data_agendada(valor: Any) -> str:
-    if valor in (None, "", "--"):
-        return "--"
-
-    try:
-        serie = pd.to_datetime(pd.Series([valor]), errors="coerce")
-    except Exception:  # pragma: no cover - valores inesperados
-        return "--"
-
-    dt = serie.iloc[0]
-    if pd.isna(dt):
-        return "--"
-    return dt.strftime("%d/%m/%Y %H:%M")
+STATUS_DESTINO_TEC_CAMPO = "TEC-CAMPO"
 
 
-@st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_api_client"})
+@st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_client"})
 def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
     issues, _ = cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
     return issues
 
 
-def _deduplicar_chamados(*listas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _deduplicar_chamados(*listas: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     vistos: Dict[str, Dict[str, Any]] = {}
     for lista in listas:
         for issue in lista:
-            chave = issue.get("key")
+            chave = issue.get("key") or issue.get("id") or issue.get("self")
             if chave and chave not in vistos:
                 vistos[chave] = issue
-            elif not chave:
-                # Mantém itens sem chave única usando ``id`` ou ``self`` como fallback.
-                marcador = issue.get("id") or issue.get("self")
-                if marcador and marcador not in vistos:
-                    vistos[marcador] = issue
     return list(vistos.values())
 
 
-def _flatten_por_loja(agrupados: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+def _filtrar_por_busca(chamados: List[Dict[str, Any]], termo: str) -> List[Dict[str, Any]]:
+    if not termo:
+        return chamados
+
+    termo_norm = termo.strip().lower()
+    if not termo_norm:
+        return chamados
+
+    filtrados: List[Dict[str, Any]] = []
+    for issue in chamados:
+        fields = issue.get("fields", {}) or {}
+        loja_valor = fields.get("customfield_14954")
+        loja_texto = ""
+        if isinstance(loja_valor, dict):
+            loja_texto = " ".join(
+                str(loja_valor.get(chave) or "")
+                for chave in ("value", "label", "name", "displayName", "text")
+            )
+        elif isinstance(loja_valor, str):
+            loja_texto = loja_valor
+
+        candidatos = [
+            issue.get("key", ""),
+            fields.get("summary", ""),
+            fields.get("customfield_14829", ""),
+            fields.get("customfield_12374", ""),
+            fields.get("customfield_12036", ""),
+            loja_texto,
+        ]
+        if any(termo_norm in str(valor).lower() for valor in candidatos if valor):
+            filtrados.append(issue)
+    return filtrados
+
+
+def _flatten_agrupado(agrupado: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     chamados: List[Dict[str, Any]] = []
-    for lista in agrupados.values():
+    for lista in agrupado.values():
         chamados.extend(lista)
     return chamados
 
 
-def montar_dataframe_chamados(
-    chamados: List[Dict[str, Any]],
-    mapa_tecnicos: Optional[Dict[str, Optional[str]]] = None,
-) -> pd.DataFrame:
+def _formatar_data_agendada(valor: Any) -> str:
+    if not valor:
+        return "--"
+    serie = pd.to_datetime(pd.Series([valor]), errors="coerce", utc=True)
+    dt = serie.iloc[0]
+    if pd.isna(dt):
+        return "--"
+    return dt.tz_convert("America/Sao_Paulo").strftime("%d/%m/%Y %H:%M") if dt.tzinfo else dt.strftime("%d/%m/%Y %H:%M")
+
+
+def _icone_idade(created: Any) -> str:
+    if not created:
+        return "⚪"
+    dt = pd.to_datetime(created, utc=True, errors="coerce")
+    if pd.isna(dt):
+        return "⚪"
+    agora = pd.Timestamp.now(tz="UTC")
+    dias = (agora - dt).days
+    if dias >= 5:
+        return "🔴"
+    if dias >= 2:
+        return "🟡"
+    return "🟢"
+
+
+def _idade_dias(created: Any) -> Optional[int]:
+    if not created:
+        return None
+    dt = pd.to_datetime(created, utc=True, errors="coerce")
+    if pd.isna(dt):
+        return None
+    agora = pd.Timestamp.now(tz="UTC")
+    return (agora - dt).days
+
+
+def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
     df = pd.DataFrame(chamados)
     if df.empty:
         return df
 
-    if mapa_tecnicos and "tecnico_account_id" in df.columns:
-        inverso = {acc: nome for nome, acc in mapa_tecnicos.items() if acc}
-        df["tecnico"] = df.get("tecnico_account_id").map(lambda acc: inverso.get(acc))
+    df["Prioridade"] = df["created"].apply(_icone_idade)
+    df["Idade (dias)"] = df["created"].apply(_idade_dias)
+    df["Criado em"] = pd.to_datetime(df["created"], errors="coerce", utc=True).dt.tz_convert("America/Sao_Paulo").dt.strftime("%d/%m/%Y %H:%M")
+    df["Agendado para"] = df["data_agendada"].apply(_formatar_data_agendada)
 
-    if "tecnico" in df.columns:
-        df["tecnico"] = (
-            df["tecnico"].fillna("").map(lambda valor: valor.strip() if isinstance(valor, str) else "")
-        )
-        df["tecnico"] = df["tecnico"].replace("", DEFAULT_TECNICO)
-
-    df = df.drop(columns=["tecnico_account_id"], errors="ignore")
-
-    colunas_prioritarias = [
+    colunas = [
+        "Prioridade",
+        "Idade (dias)",
         "key",
         "status",
         "loja_codigo",
@@ -103,66 +150,33 @@ def montar_dataframe_chamados(
         "ativo",
         "problema",
         "Agendado para",
-        "data_agendada",
-        "data_agendada_original",
-        "tecnico",
-        "created",
+        "Criado em",
+        "resumo",
+        "endereco",
+        "estado",
+        "cidade",
+        "cep",
     ]
-    existentes = [col for col in colunas_prioritarias if col in df.columns]
+
+    existentes = [col for col in colunas if col in df.columns]
     restantes = [col for col in df.columns if col not in existentes]
     df = df[existentes + restantes]
-
-    if "data_agendada" in df.columns:
-        datas = pd.to_datetime(df["data_agendada"], errors="coerce")
-        df["data_agendada_formatada"] = datas.dt.strftime("%d/%m/%Y %H:%M")
-        df["data_agendada_formatada"] = df["data_agendada_formatada"].fillna("--")
-        df["data_agendada"] = datas.dt.strftime("%Y-%m-%dT%H:%M")
-        df["data_agendada"] = df["data_agendada"].fillna("--")
-        if "data_agendada_raw" in df.columns:
-            df = df.rename(columns={"data_agendada_raw": "data_agendada_original"})
-        df = df.rename(columns={"data_agendada_formatada": "Agendado para"})
-    if "data_agendada" not in df.columns and "data_agendada_raw" in df.columns:
-        df = df.rename(columns={"data_agendada_raw": "data_agendada_original"})
-    if "created" in df.columns:
-        df["created"] = pd.to_datetime(df["created"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
     return df
 
 
-def _obter_responsavel(fields: Dict[str, Any]) -> Optional[Any]:
-    for chave in ("responsavel", "assignee"):
-        responsavel = fields.get(chave)
-        if responsavel:
-            return responsavel
-    return None
-
-
-def _esta_sem_responsavel(issue: Dict[str, Any]) -> bool:
-    fields = issue.get("fields", {}) or {}
-    responsavel = _obter_responsavel(fields)
-
-    if not responsavel:
-        return True
-
-    if isinstance(responsavel, dict):
-        return not any(
-            responsavel.get(campo)
-            for campo in ("accountId", "displayName", "name", "emailAddress")
-        )
-
-    return False
-
-
-def _exibir_lojas(
+def _renderizar_lojas(
     cliente: "jira.JiraAPI",
-    issues: List[Dict[str, Any]],
+    chamados: List[Dict[str, Any]],
     spare_keys: set[str],
-    mapa_tecnicos: Optional[Dict[str, Optional[str]]],
+    termo_busca: str,
+    chave_status: str,
 ) -> None:
-    if not issues:
-        st.info("Nenhum chamado encontrado com os filtros selecionados.")
-        return
+    chamados_filtrados = _filtrar_por_busca(chamados, termo_busca)
+    agrupados = cliente.agrupar_chamados(chamados_filtrados)
 
-    agrupados = cliente.agrupar_chamados(issues)
+    if not agrupados:
+        st.info("Nenhum chamado encontrado com os filtros atuais.")
+        return
 
     for loja_codigo in sorted(agrupados.keys(), key=str.casefold):
         chamados_loja = agrupados[loja_codigo]
@@ -174,127 +188,170 @@ def _exibir_lojas(
         if loja_nome and loja_nome != loja_codigo:
             descricao_loja = f"{loja_codigo} — {loja_nome}"
 
-        aguardando_spare = [
-            chamado for chamado in chamados_loja if chamado.get("key") in spare_keys
-        ]
-
+        aguardando_spare = [ch for ch in chamados_loja if ch.get("key") in spare_keys]
         header = f"{descricao_loja} ({len(chamados_loja)})"
         with st.expander(header, expanded=False):
             if aguardando_spare:
-                lista_keys = ", ".join(
-                    str(ch.get("key")) for ch in aguardando_spare if ch.get("key")
-                )
                 st.warning(
-                    f"Chamados aguardando Spare: {lista_keys}", icon="⚠️"
+                    "Chamados aguardando Spare: "
+                    + ", ".join(str(ch.get("key")) for ch in aguardando_spare if ch.get("key")),
+                    icon="⚠️",
                 )
 
-            titulo_mensagem = (
-                f"{loja_codigo} — {loja_nome}"
-                if loja_nome and loja_nome != loja_codigo
-                else (loja_nome or loja_codigo)
+            template_opcoes = list(TEMPLATES_DISPONIVEIS.keys())
+            template_label = st.selectbox(
+                "Template da mensagem",
+                template_opcoes,
+                format_func=lambda key: TEMPLATES_DISPONIVEIS[key],
+                key=f"template_{chave_status}_{loja_codigo}",
             )
-            mensagem = gerar_mensagem(titulo_mensagem, chamados_loja)
-            st.code(mensagem, language="markdown")
 
-            df_loja = montar_dataframe_chamados(chamados_loja, mapa_tecnicos)
+            mensagem = gerar_mensagem(descricao_loja, chamados_loja, template_id=template_label)
+            st.code(mensagem, language="markdown")
+            st.caption("Copie a mensagem acima antes de confirmar o despacho.")
+
+            col_agenda, col_botao = st.columns([2, 1])
+            data_agendada = col_agenda.date_input(
+                "Agendar todos para:",
+                key=f"data_agendar_{chave_status}_{loja_codigo}",
+                format="DD/MM/YYYY",
+            )
+
+            if col_botao.button(
+                "Agendar Todos para esta Data",
+                key=f"btn_agendar_{chave_status}_{loja_codigo}",
+            ):
+                if not data_agendada:
+                    st.warning("Selecione uma data antes de agendar.")
+                else:
+                    nova_data_iso = datetime.combine(data_agendada, time(hour=8, minute=0)).isoformat()
+                    with st.status("Agendando chamados...", expanded=True) as status_box:
+                        try:
+                            resumo = jira.atualizar_agendamento_lote(
+                                cliente,
+                                [ch.get("key") for ch in chamados_loja if ch.get("key")],
+                                nova_data_iso,
+                            )
+                            status_box.write(
+                                f"Atualizados: {resumo['sucesso']} de {resumo['total']} chamados."
+                            )
+                            if resumo["falhas"]:
+                                status_box.write(f"Falhas: {resumo['falhas']}")
+                            status_box.update(label="Agendamento concluído!", state="complete", expanded=False)
+                            st.toast("Agendamento atualizado!", icon="✅")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as erro:  # pragma: no cover - feedback ao usuário
+                            status_box.update(label=f"Erro ao agendar: {erro}", state="error")
+
+            if st.button(
+                "Copiar Mensagem e Mover para TEC-CAMPO",
+                key=f"btn_transicionar_{chave_status}_{loja_codigo}",
+            ):
+                with st.status("Despachando chamados...", expanded=True) as status_box:
+                    if pyperclip:
+                        try:
+                            pyperclip.copy(mensagem)
+                            status_box.write("Mensagem copiada para a área de transferência.")
+                        except Exception as erro:  # pragma: no cover
+                            status_box.write(f"Não foi possível copiar automaticamente: {erro}")
+                    else:
+                        status_box.write("Copie manualmente a mensagem exibida acima.")
+
+                    try:
+                        resumo = jira.transicionar_chamados(
+                            cliente,
+                            [ch.get("key") for ch in chamados_loja if ch.get("key")],
+                            STATUS_DESTINO_TEC_CAMPO,
+                        )
+                        status_box.write(
+                            f"Movidos: {resumo['sucesso']} de {resumo['total']} chamados para {STATUS_DESTINO_TEC_CAMPO}."
+                        )
+                        if resumo["falhas"]:
+                            status_box.write(f"Falhas: {resumo['falhas']}")
+                        status_box.update(label="Despacho concluído!", state="complete", expanded=False)
+                        st.toast("Chamados despachados!", icon="✅")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as erro:  # pragma: no cover
+                        status_box.update(label=f"Erro ao transicionar: {erro}", state="error")
+
+            df_loja = montar_dataframe_chamados(chamados_loja)
             if df_loja.empty:
                 st.info("Sem dados tabulares para esta loja.")
             else:
                 st.dataframe(df_loja, use_container_width=True)
 
 
-def _renderizar_nao_atribuidos(
-    cliente: "jira.JiraAPI",
-    chamados: List[Dict[str, Any]],
-    mapa_tecnicos: Dict[str, Any],
-) -> None:
-    if not chamados:
-        st.success("Todos os chamados estão atribuídos no momento.")
-        return
-
-    normalizados = _flatten_por_loja(cliente.agrupar_chamados(chamados))
-    opcoes_tecnicos = list(mapa_tecnicos.keys())
-    indice_padrao = 1 if len(opcoes_tecnicos) > 1 else 0
-
-    for chamado in sorted(normalizados, key=lambda c: c.get("created") or ""):
-        chave = chamado.get("key") or "--"
-        loja_nome = chamado.get("loja")
-        loja_codigo = chamado.get("loja_codigo") or loja_nome
-        descricao_loja = loja_codigo or loja_nome or "--"
-        if loja_nome and loja_codigo and loja_nome != loja_codigo:
-            descricao_loja = f"{loja_codigo} — {loja_nome}"
-        col_info, col_select, col_botao = st.columns([4, 3, 1])
-
-        data_agendada = (
-            chamado.get("data_agendada")
-            or chamado.get("data_agendada_raw")
-            or chamado.get("data_agendada_original")
-        )
-        data_agendada_fmt = _formatar_data_agendada(data_agendada)
-
-        col_info.markdown(
-            f"**{chave}** — {chamado.get('resumo', '--')}  \n"
-            f"Loja: {descricao_loja}  \n"
-            f"Status: {chamado.get('status', DEFAULT_STATUS)}  \n"
-            f"Agendado para: {data_agendada_fmt}"
-        )
-
-        selecionado = col_select.selectbox(
-            "Técnico",
-            opcoes_tecnicos,
-            index=indice_padrao,
-            key=f"select_tecnico_{chave}",
-        )
-
-        if col_botao.button("Atribuir", key=f"atribuir_{chave}"):
-            account_id = mapa_tecnicos.get(selecionado)
-            with st.status("Atribuindo chamado...", expanded=True) as status_box:
-                try:
-                    jira.atribuir_tecnico(cliente, chave, account_id)
-                    status_box.update(
-                        label="Chamado atribuído com sucesso!",
-                        state="complete",
-                        expanded=False,
-                    )
-                    st.toast(f"Chamado {chave} atribuído!", icon="✅")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as erro:  # pragma: no cover - feedback ao usuário
-                    status_box.update(label=f"Erro ao atribuir: {erro}", state="error")
-
-
-def _renderizar_atribuidos(
-    cliente: "jira.JiraAPI",
-    chamados: List[Dict[str, Any]],
-    mapa_tecnicos: Optional[Dict[str, Optional[str]]],
-) -> None:
-    if not chamados:
-        st.info("Não há chamados atribuídos nas consultas carregadas.")
-        return
-
+def _renderizar_agenda(cliente: "jira.JiraAPI", chamados: List[Dict[str, Any]]) -> None:
     agrupados = cliente.agrupar_chamados(chamados)
-    normalizados = _flatten_por_loja(agrupados)
+    normalizados = [ch for ch in _flatten_agrupado(agrupados) if ch.get("data_agendada")]
 
-    por_tecnico: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    inverso: Dict[str, str] = {}
-    if mapa_tecnicos:
-        inverso = {acc: nome for nome, acc in mapa_tecnicos.items() if acc}
+    if not normalizados:
+        st.info("Não há chamados com data de agendamento definida.")
+        return
 
+    eventos = []
     for chamado in normalizados:
-        conta = chamado.get("tecnico_account_id")
-        nome_tecnico = inverso.get(conta) if conta else None
-        if not nome_tecnico:
-            nome_tecnico = DEFAULT_TECNICO
-        por_tecnico[nome_tecnico].append(chamado)
+        inicio = pd.to_datetime(chamado["data_agendada"], errors="coerce", utc=True)
+        if pd.isna(inicio):
+            continue
+        fim = inicio + pd.Timedelta(hours=1)
+        eventos.append(
+            {
+                "title": f"{chamado.get('key')} — {chamado.get('loja_codigo')}",
+                "start": inicio.isoformat(),
+                "end": fim.isoformat(),
+            }
+        )
 
-    for tecnico in sorted(por_tecnico.keys(), key=str.casefold):
-        chamados_tecnico = por_tecnico[tecnico]
-        with st.expander(f"{tecnico} ({len(chamados_tecnico)})", expanded=False):
-            df_tecnico = montar_dataframe_chamados(chamados_tecnico, mapa_tecnicos)
-            if df_tecnico.empty:
-                st.info("Sem dados para exibir.")
-            else:
-                st.dataframe(df_tecnico, use_container_width=True)
+    if not eventos:
+        st.info("Não foi possível montar eventos válidos para o calendário.")
+        return
+
+    if calendar is None:
+        st.warning("streamlit-calendar não está disponível. Verifique as dependências.")
+        st.json(eventos)
+        return
+
+    options = {
+        "initialView": "timeGridWeek",
+        "locale": "pt-br",
+        "slotMinTime": "06:00:00",
+        "slotMaxTime": "22:00:00",
+        "height": 700,
+    }
+    calendar(events=eventos, options=options)
+
+
+def _renderizar_dashboard(cliente: "jira.JiraAPI", chamados: List[Dict[str, Any]]) -> None:
+    agrupados = cliente.agrupar_chamados(chamados)
+    normalizados = _flatten_agrupado(agrupados)
+    if not normalizados:
+        st.info("Nenhum dado disponível para o dashboard.")
+        return
+
+    df = montar_dataframe_chamados(normalizados)
+    if df.empty:
+        st.info("Nenhum dado disponível para o dashboard.")
+        return
+
+    st.subheader("Distribuição por Status")
+    contagem_status = df["status"].value_counts().sort_values(ascending=False)
+    st.bar_chart(contagem_status)
+
+    st.subheader("Chamados por Loja")
+    contagem_loja = df["loja_codigo"].value_counts().sort_values(ascending=False)
+    st.bar_chart(contagem_loja)
+
+    st.subheader("Tendência de Abertura (Created)")
+    datas_criacao = (
+        pd.to_datetime(df["created"], errors="coerce", utc=True)
+        .dt.tz_convert("America/Sao_Paulo")
+        .dt.date
+    )
+    tendencia = datas_criacao.value_counts().sort_index()
+    st.line_chart(tendencia)
 
 
 def main() -> None:
@@ -318,6 +375,8 @@ def main() -> None:
         "JQL_SPARE",
         "project = FSA AND \"Aguardando Spare\" = \"Sim\" ORDER BY updated DESC",
     )
+
+    busca_texto = st.sidebar.text_input("Buscar chamados", placeholder="Chave, loja, PDV, problema...")
 
     with st.sidebar.expander("Consultas JQL", expanded=False):
         jql_pendentes = st.text_area(
@@ -356,53 +415,42 @@ def main() -> None:
     chamados_spare = carregar_chamados(cliente, jql_spare)
 
     spare_keys = {issue.get("key") for issue in chamados_spare if issue.get("key")}
-    todos_abertos = _deduplicar_chamados(
-        chamados_pendentes, chamados_agendados, chamados_teccampo
+    todos_chamados = _deduplicar_chamados(
+        chamados_pendentes,
+        chamados_agendados,
+        chamados_teccampo,
+        chamados_spare,
     )
-    mapa_tecnicos = jira.get_lista_tecnicos(todos_abertos)
 
-    tab_loja, tab_tecnico = st.tabs(
-        ["Visão por Loja (Despacho)", "Visão por Técnico (Gestão)"]
-    )
+    tab_loja, tab_agenda, tab_dashboard = st.tabs([
+        "Visão por Loja (Despacho)",
+        "🗓️ Agenda",
+        "📊 Dashboard",
+    ])
 
     with tab_loja:
         st.subheader("Despacho por Loja")
-
         secoes = [
             ("Pendente Agendamento", chamados_pendentes),
             ("Agendado", chamados_agendados),
             ("Tec-Campo", chamados_teccampo),
             ("Aguardando Spare", chamados_spare),
         ]
-
         abas_status = st.tabs([titulo for titulo, _ in secoes])
-
-        for (titulo_secao, lista_chamados), aba in zip(secoes, abas_status):
+        for (titulo, lista), aba in zip(secoes, abas_status):
             with aba:
-                st.markdown(f"### {titulo_secao}")
-                _exibir_lojas(cliente, lista_chamados, spare_keys, mapa_tecnicos)
+                st.markdown(f"### {titulo}")
+                _renderizar_lojas(cliente, lista, spare_keys, busca_texto, titulo)
 
-    with tab_tecnico:
-        st.subheader("Gestão por Técnico")
+    with tab_agenda:
+        st.subheader("Agenda de Chamados")
+        _renderizar_agenda(cliente, [ch for ch in todos_chamados if ch])
 
-        if not todos_abertos:
-            st.info("Nenhum chamado aberto nas consultas carregadas.")
-            return
-
-        aba_nao_atr, aba_atr = st.tabs(["Não Atribuídos", "Atribuídos"])
-
-        with aba_nao_atr:
-            nao_atribuidos = [
-                issue for issue in todos_abertos if _esta_sem_responsavel(issue)
-            ]
-            _renderizar_nao_atribuidos(cliente, nao_atribuidos, mapa_tecnicos)
-
-        with aba_atr:
-            atribuidos = [
-                issue for issue in todos_abertos if not _esta_sem_responsavel(issue)
-            ]
-            _renderizar_atribuidos(cliente, atribuidos, mapa_tecnicos)
+    with tab_dashboard:
+        st.subheader("Indicadores Gerais")
+        _renderizar_dashboard(cliente, [ch for ch in todos_chamados if ch])
 
 
 if __name__ == "__main__":
     main()
+
