@@ -121,9 +121,9 @@ class JiraAPI:
         """Executa o endpoint de busca do Jira com suporte a paginação."""
 
         base_url = self._base()
-        candidatos = [f"{base_url}/search", f"{base_url}/search/jql"]
-        if self.use_ex_api:
-            candidatos.reverse()
+        # O endpoint /search/jql não é para busca, apenas para validação de JQL.
+        # Manter exclusivamente /search evita payloads incompatíveis.
+        candidatos = [f"{base_url}/search"]
         if isinstance(fields, str):
             fields_list = [f.strip() for f in fields.split(",") if f.strip()]
         else:
