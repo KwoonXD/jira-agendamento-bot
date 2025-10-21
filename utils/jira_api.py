@@ -261,23 +261,19 @@ class JiraAPI:
             nome_padrao = (nome or codigo_padrao).strip()
             return codigo_padrao, nome_padrao
 
-        def _extrair_tecnico(fields: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+        def _extrair_tecnico(fields: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+            """Recupera o ``accountId`` do responsável quando disponível."""
+
             for chave in ("responsavel", "assignee"):
                 responsavel = fields.get(chave)
                 if isinstance(responsavel, dict):
-                    nome = (
-                        responsavel.get("displayName")
-                        or responsavel.get("name")
-                        or responsavel.get("emailAddress")
-                    )
                     account_id = responsavel.get("accountId")
-                    if nome or account_id:
-                        nome_norm = str(nome).strip() if nome else DEFAULT_TECNICO
-                        conta_norm = str(account_id).strip() if account_id else None
-                        return nome_norm or DEFAULT_TECNICO, conta_norm
+                    if account_id:
+                        return None, str(account_id).strip()
                 elif isinstance(responsavel, str) and responsavel.strip():
+                    # Alguns ambientes retornam apenas o nome como string.
                     return responsavel.strip(), None
-            return DEFAULT_TECNICO, None
+            return None, None
 
         def _extrair_status(fields: Dict[str, Any]) -> str:
             status_info = fields.get("status")
@@ -298,6 +294,11 @@ class JiraAPI:
                 return "--"
             return str(valor).strip() or "--"
 
+        mapa_manual = get_lista_tecnicos([])
+        mapa_por_account = {
+            conta: nome for nome, conta in mapa_manual.items() if conta
+        }
+
         agrupado: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
         for issue in issues:
@@ -305,9 +306,11 @@ class JiraAPI:
 
             loja_codigo, loja_nome = _extrair_loja(fields.get("customfield_14954"))
             tecnico_nome, tecnico_account = _extrair_tecnico(fields)
-            tecnico_exibicao = (
-                tecnico_nome if tecnico_account else DEFAULT_TECNICO
-            )
+            tecnico_exibicao = DEFAULT_TECNICO
+            if tecnico_account and tecnico_account in mapa_por_account:
+                tecnico_exibicao = mapa_por_account[tecnico_account]
+            elif tecnico_nome:
+                tecnico_exibicao = tecnico_nome
             status_nome = _extrair_status(fields)
 
             agrupado[loja_codigo].append(
@@ -324,6 +327,7 @@ class JiraAPI:
                     "estado": _extrair_opcao(fields.get("customfield_11948")),
                     "cep": fields.get("customfield_11993", "--"),
                     "cidade": fields.get("customfield_11994", "--"),
+                    "data_agendada_raw": fields.get("customfield_12036"),
                     "data_agendada": fields.get("customfield_12036"),
                     "created": fields.get("created"),
                     "loja": loja_nome,
