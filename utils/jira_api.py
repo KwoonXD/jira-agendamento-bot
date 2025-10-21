@@ -305,13 +305,16 @@ class JiraAPI:
 
             loja_codigo, loja_nome = _extrair_loja(fields.get("customfield_14954"))
             tecnico_nome, tecnico_account = _extrair_tecnico(fields)
+            tecnico_exibicao = (
+                tecnico_nome if tecnico_account else DEFAULT_TECNICO
+            )
             status_nome = _extrair_status(fields)
 
             agrupado[loja_codigo].append(
                 {
                     "key": issue.get("key"),
                     "status": status_nome,
-                    "tecnico": tecnico_nome or DEFAULT_TECNICO,
+                    "tecnico": tecnico_exibicao,
                     "tecnico_account_id": tecnico_account,
                     "resumo": fields.get("summary", "--"),
                     "pdv": fields.get("customfield_14829", "--"),
@@ -458,8 +461,13 @@ def conectar_jira() -> "JiraAPI":
     )
 
 
-def get_lista_tecnicos(chamados_brutos: List[dict]) -> Dict[str, Optional[str]]:
-    """Retorna um dicionário ``displayName`` → ``accountId`` considerando o controle interno."""
+def get_lista_tecnicos(_: List[dict]) -> Dict[str, Optional[str]]:
+    """Retorna o diretório interno de técnicos (nome → accountId).
+
+    O Jira não disponibiliza a lista de técnicos para este cliente, portanto os
+    nomes devem ser mantidos manualmente em ``st.secrets``. Caso nenhum técnico
+    esteja configurado, retorna apenas a opção "Ninguém".
+    """
 
     tecnicos: Dict[str, Optional[str]] = {"Ninguém": None}
 
@@ -473,18 +481,17 @@ def get_lista_tecnicos(chamados_brutos: List[dict]) -> Dict[str, Optional[str]]:
         if nome_norm not in tecnicos:
             tecnicos[nome_norm] = conta_norm
 
-    # Preferência: configurado em ``st.secrets``.
     try:
         secrets = st.secrets  # type: ignore[attr-defined]
     except Exception:  # pragma: no cover - execução fora do Streamlit
         secrets = {}
 
-    candidatos = []
+    candidatos: List[Any] = []
     if isinstance(secrets, dict):
         for chave in ("TECNICOS", "tecnicos", "Tecnicos"):
             if chave in secrets:
                 candidatos.append(secrets[chave])
-    else:
+    else:  # pragma: no cover - modo Secrets object
         for chave in ("TECNICOS", "tecnicos", "Tecnicos"):
             if chave in secrets:
                 candidatos.append(secrets[chave])
@@ -514,23 +521,7 @@ def get_lista_tecnicos(chamados_brutos: List[dict]) -> Dict[str, Optional[str]]:
                     )
                     _adicionar(nome, conta)
 
-    # Fallback: tenta identificar a partir dos chamados recebidos.
-    if len(tecnicos) == 1:
-        for issue in chamados_brutos:
-            fields = issue.get("fields", {}) or {}
-            for chave in ("responsavel", "assignee"):
-                responsavel = fields.get(chave)
-                if isinstance(responsavel, dict):
-                    _adicionar(
-                        responsavel.get("displayName")
-                        or responsavel.get("name")
-                        or responsavel.get("emailAddress"),
-                        responsavel.get("accountId"),
-                    )
-                elif isinstance(responsavel, str):
-                    _adicionar(responsavel, None)
-
-    ordenados = {"Ninguém": None}
+    ordenados: Dict[str, Optional[str]] = {"Ninguém": None}
     for nome in sorted((n for n in tecnicos if n != "Ninguém"), key=str.casefold):
         ordenados[nome] = tecnicos[nome]
     return ordenados

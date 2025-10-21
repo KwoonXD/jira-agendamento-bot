@@ -242,7 +242,7 @@ def _renderizar_atribuidos(
     normalizados = _flatten_por_loja(agrupados)
 
     por_tecnico: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    inverso = {}
+    inverso: Dict[str, str] = {}
     if mapa_tecnicos:
         inverso = {acc: nome for nome, acc in mapa_tecnicos.items() if acc}
 
@@ -250,7 +250,7 @@ def _renderizar_atribuidos(
         conta = chamado.get("tecnico_account_id")
         nome_tecnico = inverso.get(conta) if conta else None
         if not nome_tecnico:
-            nome_tecnico = chamado.get("tecnico") or DEFAULT_TECNICO
+            nome_tecnico = DEFAULT_TECNICO
         por_tecnico[nome_tecnico].append(chamado)
 
     for tecnico in sorted(por_tecnico.keys(), key=str.casefold):
@@ -341,11 +341,12 @@ def main() -> None:
             ("Aguardando Spare", chamados_spare),
         ]
 
-        for indice, (titulo_secao, lista_chamados) in enumerate(secoes):
-            st.markdown(f"### {titulo_secao}")
-            _exibir_lojas(cliente, lista_chamados, spare_keys, mapa_tecnicos)
-            if indice < len(secoes) - 1:
-                st.divider()
+        abas_status = st.tabs([titulo for titulo, _ in secoes])
+
+        for (titulo_secao, lista_chamados), aba in zip(secoes, abas_status):
+            with aba:
+                st.markdown(f"### {titulo_secao}")
+                _exibir_lojas(cliente, lista_chamados, spare_keys, mapa_tecnicos)
 
     with tab_tecnico:
         st.subheader("Gestão por Técnico")
