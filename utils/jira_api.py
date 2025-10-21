@@ -138,81 +138,150 @@ class JiraAPI:
                 cleaned_fields.append(campo)
         fields_list = cleaned_fields
 
+        def _montar_body(
+            base: Dict[str, Any],
+            modo: str,
+            usa_nextpage: bool,
+        ) -> Dict[str, Any]:
+            body = dict(base)
+            if modo == "query_str":
+                body["query"] = jql
+            elif modo == "query_obj":
+                body["query"] = {"jql": jql}
+            elif modo == "jql_key":
+                body["jql"] = jql
+            else:  # pragma: no cover - modo desconhecido
+                raise ValueError(f"Modo de payload desconhecido: {modo}")
+
+            if reconcile and not usa_nextpage:
+                body["reconcileIssues"] = []
+            return body
+
         def _executar_busca(url: str) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
-            issues: List[dict] = []
-            last_resp: Dict[str, Any] = {}
-            next_token: Optional[Union[str, int]] = None
             usa_nextpage = url.endswith("/search/jql")
+            payload_modes: List[str] = ["jql_key"]
+            if usa_nextpage:
+                payload_modes = ["query_str", "query_obj", "jql_key"]
 
-            while True:
-                body: Dict[str, Any] = {"maxResults": int(page_size)}
-                if fields_list:
-                    body["fields"] = fields_list
-                if expand:
-                    body["expand"] = expand
-                if usa_nextpage:
-                    body["query"] = jql
-                else:
-                    body["jql"] = jql
-                if reconcile and not usa_nextpage:
-                    body["reconcileIssues"] = []
-                if next_token is not None:
+            ultimo_meta: Dict[str, Any] = {}
+
+            for modo in payload_modes:
+                issues: List[dict] = []
+                last_resp: Dict[str, Any] = {}
+                next_token: Optional[Union[str, int]] = None
+
+                erro_ocorrido = False
+
+                while True:
+                    base: Dict[str, Any] = {"maxResults": int(page_size)}
+                    if fields_list:
+                        base["fields"] = fields_list
+                    if expand:
+                        base["expand"] = expand
+                    if next_token is not None:
+                        if usa_nextpage:
+                            base["nextPageToken"] = next_token
+                        else:
+                            base["startAt"] = int(next_token)
+
+                    body = _montar_body(base, modo, usa_nextpage)
+
+                    try:
+                        resp = self._req("POST", url, json_body=body)
+                    except requests.RequestException as exc:
+                        meta = {
+                            "url": url,
+                            "params": body,
+                            "status": -1,
+                            "error": str(exc),
+                            "count": 0,
+                            "method": "POST",
+                        }
+                        self._set_debug(url, body, -1, str(exc), 0, "POST")
+                        ultimo_meta = meta
+                        erro_ocorrido = True
+                        break
+
+                    if resp.status_code != 200:
+                        err = _safe_json(resp)
+                        meta = {
+                            "url": url,
+                            "params": body,
+                            "status": resp.status_code,
+                            "error": err,
+                            "count": 0,
+                            "method": "POST",
+                        }
+                        self._set_debug(url, body, resp.status_code, err, 0, "POST")
+                        ultimo_meta = meta
+                        erro_ocorrido = True
+                        break
+
+                    data = resp.json()
+                    batch = data.get("issues", [])
+                    issues.extend(batch)
+                    last_resp = {
+                        "url": url,
+                        "params": body,
+                        "status": 200,
+                        "count": len(batch),
+                        "method": "POST",
+                    }
+
                     if usa_nextpage:
-                        body["nextPageToken"] = next_token
+                        next_token = data.get("nextPageToken")
+                        if not next_token:
+                            break
                     else:
-                        body["startAt"] = int(next_token)
+                        start_at = data.get("startAt", 0)
+                        max_results = data.get("maxResults", len(batch) or page_size)
+                        total = data.get("total")
+                        proximo = start_at + max_results
+                        if total is None or proximo >= int(total) or len(batch) == 0:
+                            break
+                        next_token = proximo
 
-                try:
-                    resp = self._req("POST", url, json_body=body)
-                except requests.RequestException as exc:
-                    self._set_debug(url, body, -1, str(exc), 0, "POST")
-                    return None, {
-                        "url": url,
-                        "params": body,
-                        "status": -1,
-                        "error": str(exc),
-                        "count": 0,
-                        "method": "POST",
-                    }
-
-                if resp.status_code != 200:
-                    err = _safe_json(resp)
-                    self._set_debug(url, body, resp.status_code, err, 0, "POST")
-                    return None, {
-                        "url": url,
-                        "params": body,
-                        "status": resp.status_code,
-                        "error": err,
-                        "count": 0,
-                        "method": "POST",
-                    }
-
-                data = resp.json()
-                batch = data.get("issues", [])
-                issues.extend(batch)
-                last_resp = {
-                    "url": url,
-                    "params": body,
-                    "status": 200,
-                    "count": len(batch),
-                    "method": "POST",
-                }
-
-                if usa_nextpage:
-                    next_token = data.get("nextPageToken")
-                    if not next_token:
-                        break
                 else:
-                    start_at = data.get("startAt", 0)
-                    max_results = data.get("maxResults", len(batch) or page_size)
-                    total = data.get("total")
-                    proximo = start_at + max_results
-                    if total is None or proximo >= int(total) or len(batch) == 0:
-                        break
-                    next_token = proximo
+                    # While não executou break -> completou sem páginas (improvável)
+                    pass
 
-            self._set_debug(url, last_resp.get("params"), last_resp.get("status", 200), None, len(issues), "POST")
-            return issues, {"url": url, "status": 200, "count": len(issues), "method": "POST"}
+                if not erro_ocorrido:
+                    if issues:
+                        self._set_debug(
+                            url,
+                            last_resp.get("params"),
+                            last_resp.get("status", 200),
+                            None,
+                            len(issues),
+                            "POST",
+                        )
+                        return issues, {
+                            "url": url,
+                            "status": 200,
+                            "count": len(issues),
+                            "method": "POST",
+                        }
+
+                    # Nenhuma issue retornada pode significar tanto sucesso quanto lista vazia.
+                    # Se a última resposta teve status 200, retornamos imediatamente para não tentar
+                    # outros modos desnecessariamente.
+                    if last_resp.get("status") == 200:
+                        self._set_debug(
+                            url,
+                            last_resp.get("params"),
+                            200,
+                            None,
+                            len(issues),
+                            "POST",
+                        )
+                        return issues, {
+                            "url": url,
+                            "status": 200,
+                            "count": len(issues),
+                            "method": "POST",
+                        }
+
+            return None, ultimo_meta or {"url": url, "status": None, "count": 0, "method": "POST"}
 
         ultimo_meta: Dict[str, Any] = {}
         for indice, url in enumerate(candidatos):
