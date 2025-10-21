@@ -148,6 +148,8 @@ class JiraAPI:
                 body["query"] = jql
             elif modo == "query_obj":
                 body["query"] = {"jql": jql}
+            elif modo == "query_obj_type_v1":
+                body["query"] = {"type": "JqlQueryV1", "query": jql}
             elif modo == "jql_key":
                 body["jql"] = jql
             else:  # pragma: no cover - modo desconhecido
@@ -161,7 +163,7 @@ class JiraAPI:
             usa_nextpage = url.endswith("/search/jql")
             payload_modes: List[str] = ["jql_key"]
             if usa_nextpage:
-                payload_modes = ["query_str", "query_obj", "jql_key"]
+                payload_modes = ["query_obj_type_v1", "query_str", "query_obj", "jql_key"]
 
             ultimo_meta: Dict[str, Any] = {}
 
