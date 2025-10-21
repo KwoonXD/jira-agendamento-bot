@@ -161,12 +161,14 @@ class JiraAPI:
 
         def _executar_busca(url: str) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
             usa_nextpage = url.endswith("/search/jql")
-            payload_modes: List[str] = ["jql_key"]
+            payload_modes: List[str]
             if usa_nextpage:
                 # A API experimental (/search/jql) espera um payload com a chave "query"
                 # contendo a string JQL, que corresponde ao modo "query_str".
                 # Os outros modos (como jql_key) causam HTTP 400.
                 payload_modes = ["query_str"]
+            else:
+                payload_modes = ["jql_key"]
 
             ultimo_meta: Dict[str, Any] = {}
 
