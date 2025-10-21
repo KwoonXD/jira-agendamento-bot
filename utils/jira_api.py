@@ -275,6 +275,7 @@ class JiraAPI:
         for issue in issues:
             fields = issue.get("fields", {}) or {}
             loja_codigo, loja_nome = _extrair_loja(fields.get("customfield_14954"))
+            historico_info = analisar_historico(issue)
 
             agrupado[loja_codigo].append(
                 {
@@ -292,7 +293,9 @@ class JiraAPI:
                     "created": fields.get("created"),
                     "loja": loja_nome,
                     "loja_codigo": loja_codigo,
-                    "historico_alerta": analisar_historico(issue),
+                    "historico_alerta": historico_info.get("alerta", ""),
+                    "dias_no_status": historico_info.get("dias_no_status"),
+                    "descricao_completa": fields.get("description"),
                 }
             )
 
@@ -473,14 +476,14 @@ def atualizar_agendamento_lote(cliente: JiraAPI, chaves: List[str], nova_data: s
     return {"total": total, "sucesso": sucesso, "falhas": falhas, "data": nova_data}
 
 
-def analisar_historico(issue: Dict[str, Any]) -> str:
-    """Analisa o changelog para sinalizar reaberturas ou paradas prolongadas."""
+def analisar_historico(issue: Dict[str, Any]) -> Dict[str, Any]:
+    """Analisa o changelog para sinalizar reaberturas e tempo no status atual."""
 
     changelog = issue.get("changelog") or {}
     histories = changelog.get("histories") or []
 
     if not histories:
-        return ""
+        return {"alerta": "", "dias_no_status": None}
 
     final_status = {
         "Resolvido",
@@ -494,10 +497,22 @@ def analisar_historico(issue: Dict[str, Any]) -> str:
         "Done",
     }
 
-    reaberto = False
-    ultima_transicao_dt: Optional[pd.Timestamp] = None
+    current_status = (
+        ((issue.get("fields", {}) or {}).get("status", {}) or {}).get("name")
+        if isinstance((issue.get("fields", {}) or {}).get("status"), dict)
+        else (issue.get("fields", {}) or {}).get("status")
+    )
+    current_status = str(current_status or "").strip()
 
-    for history in histories:
+    histories_sorted = sorted(
+        histories,
+        key=lambda item: item.get("created") or "",
+    )
+
+    reaberto = False
+    entrada_status_atual: Optional[pd.Timestamp] = None
+
+    for history in histories_sorted:
         created = history.get("created")
         dt = pd.to_datetime(created, utc=True, errors="coerce")
         for item in history.get("items", []) or []:
@@ -507,19 +522,24 @@ def analisar_historico(issue: Dict[str, Any]) -> str:
             destino = (item.get("toString") or "").strip()
             if origem and destino and origem in final_status and destino not in final_status:
                 reaberto = True
-            if dt is not None and not pd.isna(dt):
-                if ultima_transicao_dt is None or dt > ultima_transicao_dt:
-                    ultima_transicao_dt = dt
+            if current_status and destino and destino.lower() == current_status.lower():
+                if dt is not None and not pd.isna(dt):
+                    entrada_status_atual = dt
+
+    if entrada_status_atual is None:
+        created = ((issue.get("fields", {}) or {}).get("created"))
+        entrada_status_atual = pd.to_datetime(created, utc=True, errors="coerce")
+
+    dias_no_status: Optional[int] = None
+    if entrada_status_atual is not None and not pd.isna(entrada_status_atual):
+        agora = pd.Timestamp.now(tz="UTC")
+        dias_no_status = (agora - entrada_status_atual).days
 
     alertas: List[str] = []
     if reaberto:
         alertas.append("🔄 Reaberto")
+    if dias_no_status is not None and dias_no_status > 10:
+        alertas.append("⏳ Parado")
 
-    if ultima_transicao_dt is not None and not pd.isna(ultima_transicao_dt):
-        agora = pd.Timestamp.now(tz="UTC")
-        dias = (agora - ultima_transicao_dt).days
-        if dias > 10:
-            alertas.append("⏳ Parado")
-
-    return " ".join(alertas)
+    return {"alerta": " ".join(alertas), "dias_no_status": dias_no_status}
 
