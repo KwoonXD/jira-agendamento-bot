@@ -44,9 +44,13 @@ TEC_LIST_KEY = "tecnicos_df"
 
 
 @st.cache_data(ttl=600, hash_funcs={jira.JiraAPI: lambda _: "jira_client"})
-def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> List[Dict[str, Any]]:
-    issues, _ = cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
-    return issues
+def _buscar_chamados_cache(cliente: "jira.JiraAPI", jql: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    return cliente.buscar_chamados_enhanced(jql, fields=CAMPOS_JIRA)
+
+
+def carregar_chamados(cliente: "jira.JiraAPI", jql: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    issues, meta = _buscar_chamados_cache(cliente, jql)
+    return issues, meta or {}
 
 
 def _deduplicar_chamados(*listas: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -131,6 +135,7 @@ def _slugify_chave(valor: str) -> str:
     return slug or "sem_identificacao"
 
 
+# ESTA É A FUNÇÃO CORRIGIDA (VERSÃO ORIGINAL)
 def _agrupar_por_data_agendada_raw(
     chamados: List[Dict[str, Any]]
 ) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
@@ -138,7 +143,7 @@ def _agrupar_por_data_agendada_raw(
     for issue in chamados:
         fields = issue.get("fields", {}) or {}
         data = fields.get("customfield_12036")
-        dt = pd.to_datetime(data, errors="coerce", utc=True)
+        dt = pd.to_datetime(data, errors="coerce", utc=True) # Corrigido para usar utc=True
         if pd.isna(dt):
             label = "Sem data definida"
             ordem = None
@@ -898,10 +903,36 @@ def main() -> None:
     jql_teccampo = st.session_state.get("jql_teccampo", jql_teccampo_default)
     jql_spare = st.session_state.get("jql_spare", jql_spare_default)
 
-    chamados_pendentes = carregar_chamados(cliente, jql_pendentes)
-    chamados_agendados = carregar_chamados(cliente, jql_agendados)
-    chamados_teccampo = carregar_chamados(cliente, jql_teccampo)
-    chamados_spare = carregar_chamados(cliente, jql_spare)
+    chamados_pendentes, meta_pendentes = carregar_chamados(cliente, jql_pendentes)
+    chamados_agendados, meta_agendados = carregar_chamados(cliente, jql_agendados)
+    chamados_teccampo, meta_teccampo = carregar_chamados(cliente, jql_teccampo)
+    chamados_spare, meta_spare = carregar_chamados(cliente, jql_spare)
+
+    consultas_info = [
+        ("Pendentes", meta_pendentes),
+        ("Agendados", meta_agendados),
+        ("Tec-Campo", meta_teccampo),
+        ("Spare", meta_spare),
+    ]
+
+    problemas_consulta = [
+        (titulo, meta)
+        for titulo, meta in consultas_info
+        if (meta.get("status") not in {None, 200}) or meta.get("error")
+    ]
+    if problemas_consulta:
+        with st.expander("Erros ao consultar o Jira", expanded=True):
+            for titulo, meta in problemas_consulta:
+                st.error(
+                    "\n".join(
+                        [
+                            f"Consulta: {titulo}",
+                            f"Status HTTP: {meta.get('status', 'desconhecido')}",
+                            f"Endpoint: {meta.get('url', '--')}",
+                            f"Detalhes: {meta.get('error', 'Sem detalhes retornados.')}",
+                        ]
+                    )
+                )
 
     spare_keys = {issue.get("key") for issue in chamados_spare if issue.get("key")}
     todos_chamados = _deduplicar_chamados(
@@ -935,6 +966,8 @@ def main() -> None:
         for (titulo, lista), aba in zip(secoes, abas_status):
             with aba:
                 st.markdown(f"### {titulo}")
+                
+                # ESTA É A LÓGICA CORRIGIDA (VERSÃO ORIGINAL)
                 grupos_por_data = _agrupar_por_data_agendada_raw(lista)
                 if not grupos_por_data:
                     st.info("Nenhum chamado encontrado com os filtros atuais.")
@@ -942,15 +975,19 @@ def main() -> None:
 
                 for data_label, slug, itens in grupos_por_data:
                     if data_label == "Sem data definida":
+                        # Renderiza "Sem data" apenas para abas que não sejam "Agendado"
+                        if titulo == "Agendado":
+                            continue
                         st.subheader("Sem data de agendamento")
                     else:
                         st.subheader(f"Agenda de {data_label}")
+                    
                     _renderizar_lojas(
                         cliente,
                         itens,
                         spare_keys,
                         busca_texto,
-                        f"{titulo}_{slug}",
+                        f"{titulo}_{slug}", # Chave única para o status/data
                         modo_compacto=modo_compacto,
                     )
 
@@ -968,4 +1005,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

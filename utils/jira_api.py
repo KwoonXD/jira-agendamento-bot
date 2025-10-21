@@ -4,7 +4,8 @@ from __future__ import annotations
 import base64
 import json
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import requests
@@ -113,16 +114,16 @@ class JiraAPI:
     def buscar_chamados_enhanced(
         self,
         jql: str,
-        fields: str | List[str],
+        fields: Union[str, List[str]],
         page_size: int = 100,
         reconcile: bool = False,
     ) -> Tuple[List[dict], Dict[str, Any]]:
-        """Executa o endpoint POST /search/jql com suporte a paginação."""
+        """Executa o endpoint de busca do Jira com suporte a paginação."""
 
-        # Alguns ambientes Jira (especialmente Server/DC) não suportam o endpoint
-        # ``/search/jql``. Para manter compatibilidade ampla utilizamos o
-        # endpoint clássico ``/search``.
-        url = f"{self._base()}/search"
+        base_url = self._base()
+        # O endpoint /search/jql não é para busca, apenas para validação de JQL.
+        # Manter exclusivamente /search evita payloads incompatíveis.
+        candidatos = [f"{base_url}/search"]
         if isinstance(fields, str):
             fields_list = [f.strip() for f in fields.split(",") if f.strip()]
         else:
@@ -137,58 +138,164 @@ class JiraAPI:
                 cleaned_fields.append(campo)
         fields_list = cleaned_fields
 
-        issues: List[dict] = []
-        next_page_token: Optional[str] = None
-        last_resp: Dict[str, Any] = {}
+        def _montar_body(
+            base: Dict[str, Any],
+            modo: str,
+            usa_nextpage: bool,
+        ) -> Dict[str, Any]:
+            body = dict(base)
+            if modo == "query_str":
+                body["query"] = jql
+            elif modo == "query_obj":
+                body["query"] = {"jql": jql}
+            elif modo == "query_obj_type_v1":
+                body["query"] = {"type": "JqlQueryV1", "query": jql}
+            elif modo == "jql_key":
+                body["jql"] = jql
+            else:  # pragma: no cover - modo desconhecido
+                raise ValueError(f"Modo de payload desconhecido: {modo}")
 
-        while True:
-            body: Dict[str, Any] = {
-                "jql": jql,
-                "maxResults": int(page_size),
-                "fields": fields_list,
-            }
-            if expand:
-                body["expand"] = expand
-            if reconcile:
+            if reconcile and not usa_nextpage:
                 body["reconcileIssues"] = []
-            if next_page_token:
-                body["nextPageToken"] = next_page_token
+            return body
 
-            try:
-                resp = self._req("POST", url, json_body=body)
-                if resp.status_code != 200:
-                    err = _safe_json(resp)
-                    self._set_debug(url, body, resp.status_code, err, 0, "POST")
-                    return [], {
+        def _executar_busca(url: str) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
+            usa_nextpage = url.endswith("/search/jql")
+            payload_modes: List[str] = ["jql_key"]
+            if usa_nextpage:
+                payload_modes = ["query_obj_type_v1", "query_str", "query_obj", "jql_key"]
+
+            ultimo_meta: Dict[str, Any] = {}
+
+            for modo in payload_modes:
+                issues: List[dict] = []
+                last_resp: Dict[str, Any] = {}
+                next_token: Optional[Union[str, int]] = None
+
+                erro_ocorrido = False
+
+                while True:
+                    base: Dict[str, Any] = {"maxResults": int(page_size)}
+                    if fields_list:
+                        base["fields"] = fields_list
+                    if expand:
+                        base["expand"] = expand
+                    if next_token is not None:
+                        if usa_nextpage:
+                            base["nextPageToken"] = next_token
+                        else:
+                            base["startAt"] = int(next_token)
+
+                    body = _montar_body(base, modo, usa_nextpage)
+
+                    try:
+                        resp = self._req("POST", url, json_body=body)
+                    except requests.RequestException as exc:
+                        meta = {
+                            "url": url,
+                            "params": body,
+                            "status": -1,
+                            "error": str(exc),
+                            "count": 0,
+                            "method": "POST",
+                        }
+                        self._set_debug(url, body, -1, str(exc), 0, "POST")
+                        ultimo_meta = meta
+                        erro_ocorrido = True
+                        break
+
+                    if resp.status_code != 200:
+                        err = _safe_json(resp)
+                        meta = {
+                            "url": url,
+                            "params": body,
+                            "status": resp.status_code,
+                            "error": err,
+                            "count": 0,
+                            "method": "POST",
+                        }
+                        self._set_debug(url, body, resp.status_code, err, 0, "POST")
+                        ultimo_meta = meta
+                        erro_ocorrido = True
+                        break
+
+                    data = resp.json()
+                    batch = data.get("issues", [])
+                    issues.extend(batch)
+                    last_resp = {
                         "url": url,
                         "params": body,
-                        "status": resp.status_code,
-                        "error": err,
-                        "count": 0,
+                        "status": 200,
+                        "count": len(batch),
                         "method": "POST",
                     }
 
-                data = resp.json()
-                batch = data.get("issues", [])
-                issues.extend(batch)
-                next_page_token = data.get("nextPageToken")
-                last_resp = {"url": url, "params": body, "status": 200, "count": len(batch), "method": "POST"}
+                    if usa_nextpage:
+                        next_token = data.get("nextPageToken")
+                        if not next_token:
+                            break
+                    else:
+                        start_at = data.get("startAt", 0)
+                        max_results = data.get("maxResults", len(batch) or page_size)
+                        total = data.get("total")
+                        proximo = start_at + max_results
+                        if total is None or proximo >= int(total) or len(batch) == 0:
+                            break
+                        next_token = proximo
 
-                if not next_page_token:
-                    break
-            except requests.RequestException as exc:
-                self._set_debug(url, body, -1, str(exc), 0, "POST")
-                return [], {
-                    "url": url,
-                    "params": body,
-                    "status": -1,
-                    "error": str(exc),
-                    "count": 0,
-                    "method": "POST",
-                }
+                else:
+                    # While não executou break -> completou sem páginas (improvável)
+                    pass
 
-        self._set_debug(url, last_resp.get("params"), last_resp.get("status", 200), None, len(issues), "POST")
-        return issues, {"url": url, "status": 200, "count": len(issues), "method": "POST"}
+                if not erro_ocorrido:
+                    if issues:
+                        self._set_debug(
+                            url,
+                            last_resp.get("params"),
+                            last_resp.get("status", 200),
+                            None,
+                            len(issues),
+                            "POST",
+                        )
+                        return issues, {
+                            "url": url,
+                            "status": 200,
+                            "count": len(issues),
+                            "method": "POST",
+                        }
+
+                    # Nenhuma issue retornada pode significar tanto sucesso quanto lista vazia.
+                    # Se a última resposta teve status 200, retornamos imediatamente para não tentar
+                    # outros modos desnecessariamente.
+                    if last_resp.get("status") == 200:
+                        self._set_debug(
+                            url,
+                            last_resp.get("params"),
+                            200,
+                            None,
+                            len(issues),
+                            "POST",
+                        )
+                        return issues, {
+                            "url": url,
+                            "status": 200,
+                            "count": len(issues),
+                            "method": "POST",
+                        }
+
+            return None, ultimo_meta or {"url": url, "status": None, "count": 0, "method": "POST"}
+
+        ultimo_meta: Dict[str, Any] = {}
+        for indice, url in enumerate(candidatos):
+            resultado, meta = _executar_busca(url)
+            if resultado is not None:
+                return resultado, meta
+            ultimo_meta = meta
+            status = meta.get("status")
+            if status not in {404, 405, 410} or indice == len(candidatos) - 1:
+                break
+
+        return [], ultimo_meta or {"url": candidatos[-1], "status": None, "count": 0, "method": "POST"}
 
     def agrupar_chamados(self, issues: List[dict]) -> Dict[str, List[Dict[str, Any]]]:
         """Agrupa os chamados por loja, extraindo campos utilizados pelo app."""
@@ -358,14 +465,41 @@ def conectar_jira() -> "JiraAPI":
     """Cria (ou reutiliza) uma instância de :class:`JiraAPI` com base no ``st.secrets``."""
 
     raiz = st.secrets
-    config = raiz.get("JIRA") if isinstance(raiz.get("JIRA"), dict) else {}
+
+    def _safe_get(container: Any, chave: str) -> Any:
+        """Obtém valores de ``st.secrets`` (ou dicts) sem propagar ``KeyError``."""
+
+        if container is None:
+            return None
+
+        getter = getattr(container, "get", None)
+        if callable(getter):
+            try:
+                return getter(chave, None)
+            except TypeError:
+                try:
+                    return getter(chave)
+                except KeyError:
+                    return None
+            except KeyError:
+                return None
+
+        try:
+            return container[chave]  # type: ignore[index]
+        except (KeyError, TypeError):
+            return None
+
+    config_raw = _safe_get(raiz, "JIRA")
+    config = config_raw if isinstance(config_raw, Mapping) else {}
 
     def _buscar_chave(chaves: List[str]) -> Optional[str]:
         for chave in chaves:
-            if chave in config and config[chave]:
+            if isinstance(config, Mapping) and chave in config and config[chave]:
                 return str(config[chave])
-            if chave in raiz and raiz[chave]:
-                return str(raiz[chave])
+
+            valor_raiz = _safe_get(raiz, chave)
+            if valor_raiz:
+                return str(valor_raiz)
         return None
 
     email = _buscar_chave(["email", "EMAIL", "jira_email", "JIRA_EMAIL", "username", "USERNAME", "user", "USER"])
