@@ -131,6 +131,7 @@ def _slugify_chave(valor: str) -> str:
     return slug or "sem_identificacao"
 
 
+# ESTA É A FUNÇÃO CORRIGIDA (VERSÃO ORIGINAL)
 def _agrupar_por_data_agendada_raw(
     chamados: List[Dict[str, Any]]
 ) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
@@ -138,7 +139,7 @@ def _agrupar_por_data_agendada_raw(
     for issue in chamados:
         fields = issue.get("fields", {}) or {}
         data = fields.get("customfield_12036")
-        dt = pd.to_datetime(data, errors="coerce", utc=True)
+        dt = pd.to_datetime(data, errors="coerce", utc=True) # Corrigido para usar utc=True
         if pd.isna(dt):
             label = "Sem data definida"
             ordem = None
@@ -935,6 +936,8 @@ def main() -> None:
         for (titulo, lista), aba in zip(secoes, abas_status):
             with aba:
                 st.markdown(f"### {titulo}")
+                
+                # ESTA É A LÓGICA CORRIGIDA (VERSÃO ORIGINAL)
                 grupos_por_data = _agrupar_por_data_agendada_raw(lista)
                 if not grupos_por_data:
                     st.info("Nenhum chamado encontrado com os filtros atuais.")
@@ -942,15 +945,19 @@ def main() -> None:
 
                 for data_label, slug, itens in grupos_por_data:
                     if data_label == "Sem data definida":
+                        # Renderiza "Sem data" apenas para abas que não sejam "Agendado"
+                        if titulo == "Agendado":
+                            continue
                         st.subheader("Sem data de agendamento")
                     else:
                         st.subheader(f"Agenda de {data_label}")
+                    
                     _renderizar_lojas(
                         cliente,
                         itens,
                         spare_keys,
                         busca_texto,
-                        f"{titulo}_{slug}",
+                        f"{titulo}_{slug}", # Chave única para o status/data
                         modo_compacto=modo_compacto,
                     )
 
@@ -968,4 +975,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
