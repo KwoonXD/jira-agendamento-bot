@@ -64,6 +64,7 @@ DEFAULT_STATUS = "--"
             fields_list = [f.strip() for f in fields.split(",") if f.strip()]
             fields_list = list(fields or [])
         expand: List[str] = []
+        cleaned_fields: List[str] = []
         for campo in fields_list:
                 expand.append("changelog")
                 cleaned_fields.append(campo)
@@ -73,6 +74,9 @@ DEFAULT_STATUS = "--"
             body: Dict[str, Any] = {
                 "maxResults": int(page_size),
             }
+            if cleaned_fields:
+                body["fields"] = cleaned_fields
+            if expand:
                 body["expand"] = expand
                 body["reconcileIssues"] = []
                 body["nextPageToken"] = next_page_token
