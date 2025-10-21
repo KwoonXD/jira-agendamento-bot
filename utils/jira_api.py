@@ -145,14 +145,16 @@ class JiraAPI:
             usa_nextpage = url.endswith("/search/jql")
 
             while True:
-                body: Dict[str, Any] = {
-                    "jql": jql,
-                    "maxResults": int(page_size),
-                    "fields": fields_list,
-                }
+                body: Dict[str, Any] = {"maxResults": int(page_size)}
+                if fields_list:
+                    body["fields"] = fields_list
                 if expand:
                     body["expand"] = expand
-                if reconcile:
+                if usa_nextpage:
+                    body["query"] = jql
+                else:
+                    body["jql"] = jql
+                if reconcile and not usa_nextpage:
                     body["reconcileIssues"] = []
                 if next_token is not None:
                     if usa_nextpage:
