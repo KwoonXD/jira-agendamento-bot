@@ -6,6 +6,7 @@ import json
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
 import requests
 import streamlit as st
 from requests.auth import HTTPBasicAuth
@@ -124,12 +125,27 @@ class JiraAPI:
         else:
             fields_list = list(fields or [])
 
+        expand: List[str] = []
+        cleaned_fields: List[str] = []
+        for campo in fields_list:
+            if campo.lower() == "changelog":
+                expand.append("changelog")
+            else:
+                cleaned_fields.append(campo)
+        fields_list = cleaned_fields
+
         issues: List[dict] = []
         next_page_token: Optional[str] = None
         last_resp: Dict[str, Any] = {}
 
         while True:
-            body: Dict[str, Any] = {"jql": jql, "maxResults": int(page_size), "fields": fields_list}
+            body: Dict[str, Any] = {
+                "jql": jql,
+                "maxResults": int(page_size),
+                "fields": fields_list,
+            }
+            if expand:
+                body["expand"] = expand
             if reconcile:
                 body["reconcileIssues"] = []
             if next_page_token:
@@ -276,6 +292,7 @@ class JiraAPI:
                     "created": fields.get("created"),
                     "loja": loja_nome,
                     "loja_codigo": loja_codigo,
+                    "historico_alerta": analisar_historico(issue),
                 }
             )
 
@@ -454,4 +471,55 @@ def atualizar_agendamento_lote(cliente: JiraAPI, chaves: List[str], nova_data: s
             falhas.append({"key": chave, "erro": str(exc)})
 
     return {"total": total, "sucesso": sucesso, "falhas": falhas, "data": nova_data}
+
+
+def analisar_historico(issue: Dict[str, Any]) -> str:
+    """Analisa o changelog para sinalizar reaberturas ou paradas prolongadas."""
+
+    changelog = issue.get("changelog") or {}
+    histories = changelog.get("histories") or []
+
+    if not histories:
+        return ""
+
+    final_status = {
+        "Resolvido",
+        "Resolvida",
+        "Fechado",
+        "Fechada",
+        "Encerrado",
+        "Encerrada",
+        "Closed",
+        "Resolved",
+        "Done",
+    }
+
+    reaberto = False
+    ultima_transicao_dt: Optional[pd.Timestamp] = None
+
+    for history in histories:
+        created = history.get("created")
+        dt = pd.to_datetime(created, utc=True, errors="coerce")
+        for item in history.get("items", []) or []:
+            if str(item.get("field")).lower() != "status":
+                continue
+            origem = (item.get("fromString") or "").strip()
+            destino = (item.get("toString") or "").strip()
+            if origem and destino and origem in final_status and destino not in final_status:
+                reaberto = True
+            if dt is not None and not pd.isna(dt):
+                if ultima_transicao_dt is None or dt > ultima_transicao_dt:
+                    ultima_transicao_dt = dt
+
+    alertas: List[str] = []
+    if reaberto:
+        alertas.append("🔄 Reaberto")
+
+    if ultima_transicao_dt is not None and not pd.isna(ultima_transicao_dt):
+        agora = pd.Timestamp.now(tz="UTC")
+        dias = (agora - ultima_transicao_dt).days
+        if dias > 10:
+            alertas.append("⏳ Parado")
+
+    return " ".join(alertas)
 
