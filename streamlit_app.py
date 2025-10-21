@@ -17,6 +17,7 @@ from utils import jira_api as jira
 from utils.messages import (
     TEMPLATES_DISPONIVEIS,
     gerar_mensagem,
+    verificar_duplicidade,
 )
 
 CAMPOS_JIRA: List[str] = [
@@ -32,6 +33,7 @@ CAMPOS_JIRA: List[str] = [
     "customfield_11994",  # Cidade
     "customfield_12036",  # Data agendada
     "customfield_14954",  # Loja
+    "changelog",
 ]
 
 STATUS_DESTINO_TEC_CAMPO = "TEC-CAMPO"
@@ -94,6 +96,22 @@ def _flatten_agrupado(agrupado: Dict[str, List[Dict[str, Any]]]) -> List[Dict[st
     return chamados
 
 
+def _obter_limite_sla(chave: str, padrao: int) -> int:
+    try:
+        valor = st.session_state.get(chave, padrao)
+        inteiro = int(valor)
+    except (TypeError, ValueError):
+        return padrao
+    return max(0, inteiro)
+
+
+def _filtrar_selecionados(df_editado: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df_editado, pd.DataFrame) or "Selecionar" not in df_editado.columns:
+        return pd.DataFrame(columns=df_editado.columns if isinstance(df_editado, pd.DataFrame) else [])
+    mascara = df_editado["Selecionar"].fillna(False)
+    return df_editado[mascara.astype(bool)]
+
+
 def _formatar_data_agendada(valor: Any) -> str:
     if not valor:
         return "--"
@@ -104,6 +122,82 @@ def _formatar_data_agendada(valor: Any) -> str:
     return dt.tz_convert("America/Sao_Paulo").strftime("%d/%m/%Y %H:%M") if dt.tzinfo else dt.strftime("%d/%m/%Y %H:%M")
 
 
+def _handle_agendar_lote(
+    cliente: "jira.JiraAPI",
+    df_editado: pd.DataFrame,
+    data_agendada,
+) -> None:
+    selecionados = _filtrar_selecionados(df_editado)
+    if selecionados.empty:
+        st.error("Selecione ao menos um chamado para agendar.")
+        return
+    if not data_agendada:
+        st.error("Selecione uma data antes de agendar.")
+        return
+
+    chaves = [str(chave) for chave in selecionados["key"] if chave]
+    if not chaves:
+        st.error("Não foi possível identificar as chaves selecionadas.")
+        return
+
+    nova_data_iso = datetime.combine(data_agendada, time(hour=8, minute=0)).isoformat()
+    with st.status("Agendando chamados...", expanded=True) as status_box:
+        try:
+            resumo = jira.atualizar_agendamento_lote(cliente, chaves, nova_data_iso)
+            status_box.write(
+                f"Atualizados: {resumo['sucesso']} de {resumo['total']} chamados."
+            )
+            if resumo["falhas"]:
+                status_box.write(f"Falhas: {resumo['falhas']}")
+            status_box.update(label="Agendamento concluído!", state="complete", expanded=False)
+            st.toast("Agendamento atualizado!", icon="✅")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as erro:  # pragma: no cover - feedback ao usuário
+            status_box.update(label=f"Erro ao agendar: {erro}", state="error")
+
+
+def _handle_despachar_mover(
+    cliente: "jira.JiraAPI",
+    df_editado: pd.DataFrame,
+    mensagem: str,
+    destino: str,
+) -> None:
+    selecionados = _filtrar_selecionados(df_editado)
+    if selecionados.empty:
+        st.error("Selecione ao menos um chamado para despachar.")
+        return
+
+    chaves = [str(chave) for chave in selecionados["key"] if chave]
+    if not chaves:
+        st.error("Não foi possível identificar as chaves selecionadas.")
+        return
+
+    with st.status("Despachando chamados...", expanded=True) as status_box:
+        if pyperclip:
+            try:
+                pyperclip.copy(mensagem)
+                status_box.write("Mensagem copiada para a área de transferência.")
+            except Exception as erro:  # pragma: no cover
+                status_box.write(f"Não foi possível copiar automaticamente: {erro}")
+        else:
+            status_box.write("Copie manualmente a mensagem exibida acima.")
+
+        try:
+            resumo = jira.transicionar_chamados(cliente, chaves, destino)
+            status_box.write(
+                f"Movidos: {resumo['sucesso']} de {resumo['total']} chamados para {destino}."
+            )
+            if resumo["falhas"]:
+                status_box.write(f"Falhas: {resumo['falhas']}")
+            status_box.update(label="Despacho concluído!", state="complete", expanded=False)
+            st.toast("Chamados despachados!", icon="✅")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as erro:  # pragma: no cover
+            status_box.update(label=f"Erro ao transicionar: {erro}", state="error")
+
+
 def _icone_idade(created: Any) -> str:
     if not created:
         return "⚪"
@@ -112,9 +206,13 @@ def _icone_idade(created: Any) -> str:
         return "⚪"
     agora = pd.Timestamp.now(tz="UTC")
     dias = (agora - dt).days
-    if dias >= 5:
+    amarelo = _obter_limite_sla("sla_amarelo", 3)
+    vermelho = _obter_limite_sla("sla_vermelho", 7)
+    if vermelho < amarelo:
+        vermelho = amarelo
+    if dias >= vermelho:
         return "🔴"
-    if dias >= 2:
+    if dias >= amarelo:
         return "🟡"
     return "🟢"
 
@@ -138,6 +236,10 @@ def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
     df["Idade (dias)"] = df["created"].apply(_idade_dias)
     df["Criado em"] = pd.to_datetime(df["created"], errors="coerce", utc=True).dt.tz_convert("America/Sao_Paulo").dt.strftime("%d/%m/%Y %H:%M")
     df["Agendado para"] = df["data_agendada"].apply(_formatar_data_agendada)
+    if "historico_alerta" in df.columns:
+        df["Histórico"] = df["historico_alerta"].fillna("")
+    else:
+        df["Histórico"] = ""
 
     colunas = [
         "Prioridade",
@@ -151,6 +253,7 @@ def montar_dataframe_chamados(chamados: List[Dict[str, Any]]) -> pd.DataFrame:
         "problema",
         "Agendado para",
         "Criado em",
+        "Histórico",
         "resumo",
         "endereco",
         "estado",
@@ -198,6 +301,69 @@ def _renderizar_lojas(
                     icon="⚠️",
                 )
 
+            duplicados = verificar_duplicidade(chamados_loja)
+            if duplicados:
+                descricao_dup = ", ".join(f"PDV {pdv} / Ativo {ativo}" for pdv, ativo in sorted(duplicados))
+                st.warning(
+                    "Possíveis duplicidades identificadas para esta loja: " + descricao_dup,
+                    icon="🚨",
+                )
+
+            nota_key = f"nota_{chave_status}_{loja_codigo}"
+            if nota_key not in st.session_state:
+                st.session_state[nota_key] = ""
+            st.text_area(
+                "Notas rápidas",
+                key=nota_key,
+                placeholder="Registre observações importantes desta loja...",
+                height=80,
+            )
+            if st.button("Salvar Nota", key=f"btn_salvar_nota_{chave_status}_{loja_codigo}"):
+                st.toast("Nota salva nesta sessão.", icon="💾")
+
+            df_loja = montar_dataframe_chamados(chamados_loja)
+            if df_loja.empty:
+                st.info("Sem dados tabulares para esta loja.")
+                continue
+
+            df_editor = df_loja.copy()
+            df_editor.insert(0, "Selecionar", False)
+            column_config = {
+                "Selecionar": st.column_config.CheckboxColumn(
+                    "Selecionar",
+                    help="Marque os chamados que deseja incluir nas ações em lote.",
+                    default=False,
+                )
+            }
+            for coluna in df_loja.columns:
+                column_config[coluna] = st.column_config.Column(coluna, disabled=True)
+
+            df_editado = st.data_editor(
+                df_editor,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config=column_config,
+                key=f"editor_{chave_status}_{loja_codigo}",
+            )
+            if not isinstance(df_editado, pd.DataFrame):
+                df_editado = pd.DataFrame(df_editado)
+
+            selecionados_df = _filtrar_selecionados(df_editado)
+            selecionados_keys = (
+                {str(chave) for chave in selecionados_df["key"].tolist() if chave}
+                if not selecionados_df.empty
+                else set()
+            )
+            if selecionados_keys:
+                chamados_para_mensagem = [
+                    chamado
+                    for chamado in chamados_loja
+                    if str(chamado.get("key")) in selecionados_keys
+                ]
+            else:
+                chamados_para_mensagem = chamados_loja
+
             template_opcoes = list(TEMPLATES_DISPONIVEIS.keys())
             template_label = st.selectbox(
                 "Template da mensagem",
@@ -206,81 +372,37 @@ def _renderizar_lojas(
                 key=f"template_{chave_status}_{loja_codigo}",
             )
 
-            mensagem = gerar_mensagem(descricao_loja, chamados_loja, template_id=template_label)
+            mensagem = gerar_mensagem(
+                descricao_loja,
+                chamados_para_mensagem,
+                template_id=template_label,
+            )
             st.code(mensagem, language="markdown")
             st.caption("Copie a mensagem acima antes de confirmar o despacho.")
 
-            col_agenda, col_botao = st.columns([2, 1])
+            col_agenda, col_agendar, col_despachar = st.columns([2, 1, 1])
             data_agendada = col_agenda.date_input(
-                "Agendar todos para:",
+                "Agendar selecionados para:",
                 key=f"data_agendar_{chave_status}_{loja_codigo}",
                 format="DD/MM/YYYY",
             )
 
-            if col_botao.button(
-                "Agendar Todos para esta Data",
+            if col_agendar.button(
+                "Agendar Selecionados",
                 key=f"btn_agendar_{chave_status}_{loja_codigo}",
             ):
-                if not data_agendada:
-                    st.warning("Selecione uma data antes de agendar.")
-                else:
-                    nova_data_iso = datetime.combine(data_agendada, time(hour=8, minute=0)).isoformat()
-                    with st.status("Agendando chamados...", expanded=True) as status_box:
-                        try:
-                            resumo = jira.atualizar_agendamento_lote(
-                                cliente,
-                                [ch.get("key") for ch in chamados_loja if ch.get("key")],
-                                nova_data_iso,
-                            )
-                            status_box.write(
-                                f"Atualizados: {resumo['sucesso']} de {resumo['total']} chamados."
-                            )
-                            if resumo["falhas"]:
-                                status_box.write(f"Falhas: {resumo['falhas']}")
-                            status_box.update(label="Agendamento concluído!", state="complete", expanded=False)
-                            st.toast("Agendamento atualizado!", icon="✅")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as erro:  # pragma: no cover - feedback ao usuário
-                            status_box.update(label=f"Erro ao agendar: {erro}", state="error")
+                _handle_agendar_lote(cliente, df_editado, data_agendada)
 
-            if st.button(
-                "Copiar Mensagem e Mover para TEC-CAMPO",
+            if col_despachar.button(
+                "Despachar Selecionados",
                 key=f"btn_transicionar_{chave_status}_{loja_codigo}",
             ):
-                with st.status("Despachando chamados...", expanded=True) as status_box:
-                    if pyperclip:
-                        try:
-                            pyperclip.copy(mensagem)
-                            status_box.write("Mensagem copiada para a área de transferência.")
-                        except Exception as erro:  # pragma: no cover
-                            status_box.write(f"Não foi possível copiar automaticamente: {erro}")
-                    else:
-                        status_box.write("Copie manualmente a mensagem exibida acima.")
-
-                    try:
-                        resumo = jira.transicionar_chamados(
-                            cliente,
-                            [ch.get("key") for ch in chamados_loja if ch.get("key")],
-                            STATUS_DESTINO_TEC_CAMPO,
-                        )
-                        status_box.write(
-                            f"Movidos: {resumo['sucesso']} de {resumo['total']} chamados para {STATUS_DESTINO_TEC_CAMPO}."
-                        )
-                        if resumo["falhas"]:
-                            status_box.write(f"Falhas: {resumo['falhas']}")
-                        status_box.update(label="Despacho concluído!", state="complete", expanded=False)
-                        st.toast("Chamados despachados!", icon="✅")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as erro:  # pragma: no cover
-                        status_box.update(label=f"Erro ao transicionar: {erro}", state="error")
-
-            df_loja = montar_dataframe_chamados(chamados_loja)
-            if df_loja.empty:
-                st.info("Sem dados tabulares para esta loja.")
-            else:
-                st.dataframe(df_loja, use_container_width=True)
+                _handle_despachar_mover(
+                    cliente,
+                    df_editado,
+                    mensagem,
+                    STATUS_DESTINO_TEC_CAMPO,
+                )
 
 
 def _renderizar_agenda(cliente: "jira.JiraAPI", chamados: List[Dict[str, Any]]) -> None:
@@ -376,30 +498,63 @@ def main() -> None:
         "project = FSA AND \"Aguardando Spare\" = \"Sim\" ORDER BY updated DESC",
     )
 
-    busca_texto = st.sidebar.text_input("Buscar chamados", placeholder="Chave, loja, PDV, problema...")
+    defaults_state = {
+        "sla_amarelo": st.secrets.get("SLA_AMARELO", 3),
+        "sla_vermelho": st.secrets.get("SLA_VERMELHO", 7),
+        "jql_pendentes": jql_pendentes_default,
+        "jql_agendados": jql_agendados_default,
+        "jql_teccampo": jql_teccampo_default,
+        "jql_spare": jql_spare_default,
+    }
+    for chave, valor in defaults_state.items():
+        if chave not in st.session_state:
+            st.session_state[chave] = valor
+
+    st.sidebar.number_input(
+        "SLA Amarelo (dias)",
+        min_value=0,
+        max_value=365,
+        step=1,
+        value=int(st.session_state.get("sla_amarelo", 3)),
+        key="sla_amarelo",
+    )
+    st.sidebar.number_input(
+        "SLA Vermelho (dias)",
+        min_value=0,
+        max_value=365,
+        step=1,
+        value=int(st.session_state.get("sla_vermelho", 7)),
+        key="sla_vermelho",
+    )
+
+    busca_texto = st.sidebar.text_input(
+        "Buscar chamados",
+        placeholder="Chave, loja, PDV, problema...",
+        key="busca_global",
+    )
 
     with st.sidebar.expander("Consultas JQL", expanded=False):
-        jql_pendentes = st.text_area(
+        st.text_area(
             "Pendentes",
-            jql_pendentes_default,
+            value=st.session_state.get("jql_pendentes", jql_pendentes_default),
             key="jql_pendentes",
             height=120,
         )
-        jql_agendados = st.text_area(
+        st.text_area(
             "Agendados",
-            jql_agendados_default,
+            value=st.session_state.get("jql_agendados", jql_agendados_default),
             key="jql_agendados",
             height=120,
         )
-        jql_teccampo = st.text_area(
+        st.text_area(
             "Tec-Campo",
-            jql_teccampo_default,
+            value=st.session_state.get("jql_teccampo", jql_teccampo_default),
             key="jql_teccampo",
             height=120,
         )
-        jql_spare = st.text_area(
+        st.text_area(
             "Spare",
-            jql_spare_default,
+            value=st.session_state.get("jql_spare", jql_spare_default),
             key="jql_spare",
             height=120,
         )
@@ -408,6 +563,11 @@ def main() -> None:
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
+
+    jql_pendentes = st.session_state.get("jql_pendentes", jql_pendentes_default)
+    jql_agendados = st.session_state.get("jql_agendados", jql_agendados_default)
+    jql_teccampo = st.session_state.get("jql_teccampo", jql_teccampo_default)
+    jql_spare = st.session_state.get("jql_spare", jql_spare_default)
 
     chamados_pendentes = carregar_chamados(cliente, jql_pendentes)
     chamados_agendados = carregar_chamados(cliente, jql_agendados)
