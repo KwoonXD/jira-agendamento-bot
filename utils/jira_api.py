@@ -119,7 +119,10 @@ class JiraAPI:
     ) -> Tuple[List[dict], Dict[str, Any]]:
         """Executa o endpoint POST /search/jql com suporte a paginação."""
 
-        url = f"{self._base()}/search/jql"
+        # Alguns ambientes Jira (especialmente Server/DC) não suportam o endpoint
+        # ``/search/jql``. Para manter compatibilidade ampla utilizamos o
+        # endpoint clássico ``/search``.
+        url = f"{self._base()}/search"
         if isinstance(fields, str):
             fields_list = [f.strip() for f in fields.split(",") if f.strip()]
         else:

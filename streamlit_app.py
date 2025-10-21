@@ -1,7 +1,8 @@
 import streamlit as st; st.set_page_config(page_title="🤖 Agenda Field Service", page_icon="🤖", layout="wide")
 import pandas as pd
 from datetime import datetime, time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import re
 
 try:
     import pyperclip
@@ -125,20 +126,41 @@ def _formatar_data_agendada(valor: Any) -> str:
     return dt.tz_convert("America/Sao_Paulo").strftime("%d/%m/%Y %H:%M") if dt.tzinfo else dt.strftime("%d/%m/%Y %H:%M")
 
 
-def _agrupar_por_data_agendada_raw(chamados: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    grupos: Dict[str, List[Dict[str, Any]]] = {}
+def _slugify_chave(valor: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z]+", "_", valor).strip("_")
+    return slug or "sem_identificacao"
+
+
+def _agrupar_por_data_agendada_raw(
+    chamados: List[Dict[str, Any]]
+) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
+    grupos: Dict[str, Dict[str, Any]] = {}
     for issue in chamados:
         fields = issue.get("fields", {}) or {}
         data = fields.get("customfield_12036")
-        dt = pd.to_datetime(data, errors="coerce")
+        dt = pd.to_datetime(data, errors="coerce", utc=True)
         if pd.isna(dt):
-            chave = "Sem data definida"
+            label = "Sem data definida"
+            ordem = None
         else:
-            if dt.tzinfo is None:
-                dt = dt.tz_localize("UTC")
-            chave = dt.tz_convert("America/Sao_Paulo").strftime("%d/%m/%Y")
-        grupos.setdefault(chave, []).append(issue)
-    return grupos
+            dt_local = dt.tz_convert("America/Sao_Paulo")
+            label = dt_local.strftime("%d/%m/%Y")
+            ordem = dt_local.date()
+
+        entrada = grupos.setdefault(
+            label,
+            {"issues": [], "ordem": ordem, "slug": _slugify_chave(label)},
+        )
+        entrada["issues"].append(issue)
+        if entrada.get("ordem") is None and ordem is not None:
+            entrada["ordem"] = ordem
+
+    ordenados: List[Tuple[str, str, List[Dict[str, Any]]]] = []
+    for label, payload in sorted(
+        grupos.items(), key=lambda item: (item[1]["ordem"] is None, item[1]["ordem"] or datetime.max.date())
+    ):
+        ordenados.append((label, payload.get("slug", _slugify_chave(label)), payload["issues"]))
+    return ordenados
 
 
 def _handle_agendar_lote(
@@ -913,27 +935,22 @@ def main() -> None:
         for (titulo, lista), aba in zip(secoes, abas_status):
             with aba:
                 st.markdown(f"### {titulo}")
-                if titulo == "Agendado":
-                    grupos_por_data = _agrupar_por_data_agendada_raw(lista)
-                    if not grupos_por_data:
-                        st.info("Nenhum chamado com data de agendamento definida.")
-                    for data_label in sorted(grupos_por_data.keys()):
+                grupos_por_data = _agrupar_por_data_agendada_raw(lista)
+                if not grupos_por_data:
+                    st.info("Nenhum chamado encontrado com os filtros atuais.")
+                    continue
+
+                for data_label, slug, itens in grupos_por_data:
+                    if data_label == "Sem data definida":
+                        st.subheader("Sem data de agendamento")
+                    else:
                         st.subheader(f"Agenda de {data_label}")
-                        _renderizar_lojas(
-                            cliente,
-                            grupos_por_data[data_label],
-                            spare_keys,
-                            busca_texto,
-                            f"{titulo}_{data_label}",
-                            modo_compacto=modo_compacto,
-                        )
-                else:
                     _renderizar_lojas(
                         cliente,
-                        lista,
+                        itens,
                         spare_keys,
                         busca_texto,
-                        titulo,
+                        f"{titulo}_{slug}",
                         modo_compacto=modo_compacto,
                     )
 
