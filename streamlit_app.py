@@ -812,19 +812,19 @@ def main() -> None:
 
     jql_pendentes_default = st.secrets.get(
         "JQL_PENDENTES",
-        "project = FSA AND status = \"Pendente\" ORDER BY updated DESC",
+        "project = FSA AND Status in (AGENDAMENTO)",
     )
     jql_agendados_default = st.secrets.get(
         "JQL_AGENDADOS",
-        "project = FSA AND status = \"Agendado\" ORDER BY updated DESC",
+        "project = FSA AND Status = Agendado AND \"Data/Hora - Agendamento\" is not EMPTY",
     )
     jql_teccampo_default = st.secrets.get(
         "JQL_TEC_CAMPO",
-        "project = FSA AND status = \"Tec-Campo\" ORDER BY updated DESC",
+        "project = FSA AND Status in (TEC-CAMPO)",
     )
     jql_spare_default = st.secrets.get(
         "JQL_SPARE",
-        "project = FSA AND \"Aguardando Spare\" = \"Sim\" ORDER BY updated DESC",
+        "project = FSA AND status = \"Aguardando Spare\"",
     )
 
     defaults_state = {
